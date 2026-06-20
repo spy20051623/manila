@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>马尼拉后端体验台</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="app">
+    <section class="toolbar">
+      <div>
+        <h1>马尼拉</h1>
+        <p>简易后端体验台</p>
+      </div>
+      <div class="controls">
+        <input id="seed" type="number" placeholder="seed" />
+        <button id="newGame">新建并开始</button>
+        <button id="refresh">刷新</button>
+        <button id="aiOne">当前玩家AI一步</button>
+        <button id="aiRound">AI推进一轮</button>
+        <label class="toggle"><input id="autoAI" type="checkbox" checked /> 玩家2-4 AI</label>
+      </div>
+    </section>
+
+    <section class="status">
+      <div><span>游戏</span><strong id="gameId">-</strong></div>
+      <div><span>阶段</span><strong id="phase">-</strong></div>
+      <div><span>轮次</span><strong id="round">-</strong></div>
+      <div><span>当前玩家</span><strong id="currentPlayer">-</strong></div>
+    </section>
+
+    <section class="grid">
+      <div class="panel">
+        <div class="panel-title">
+          <h2>玩家</h2>
+          <button id="toggleShares" class="small-button" type="button">显示全部股份</button>
+        </div>
+        <div id="players" class="list"></div>
+      </div>
+      <div class="panel">
+        <h2>货物价格</h2>
+        <div id="goodsMarket" class="market-grid"></div>
+      </div>
+      <div class="panel">
+        <h2>货船</h2>
+        <div id="ships" class="list"></div>
+      </div>
+      <div class="panel">
+        <h2>棋盘位置</h2>
+        <div id="boardPositions" class="board-grid"></div>
+      </div>
+      <div class="panel">
+        <h2>合法动作</h2>
+        <div id="actions" class="actions"></div>
+      </div>
+      <div class="panel">
+        <h2>事件</h2>
+        <div id="events" class="events"></div>
+      </div>
+    </section>
+
+    <section class="panel raw">
+      <h2>原始状态</h2>
+      <pre id="raw">{}</pre>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

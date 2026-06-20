@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>马尼拉棋盘桌</title>
+  <link rel="stylesheet" href="/board.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <main class="table-layout">
+      <div class="board-column">
+        <section class="top-dashboard" aria-label="当前局面">
+          <div class="global-panel">
+            <div class="panel-heading compact-heading">
+              <h2>全局</h2>
+            </div>
+            <div class="status-strip">
+              <div class="status-item status-id"><span>局号</span><strong id="gameIdText">-</strong></div>
+              <div class="status-item status-number"><span>回合</span><strong id="roundText">-</strong></div>
+              <div class="status-item status-phase"><span>阶段</span><strong id="phaseText">-</strong></div>
+              <div class="status-item status-player"><span>行动</span><strong id="currentPlayerText">-</strong></div>
+              <div class="status-item status-player"><span>港务长</span><strong id="harborMasterText">-</strong></div>
+            </div>
+          </div>
+
+          <div class="players-top-panel">
+            <div class="panel-heading compact-heading">
+              <h2>玩家</h2>
+            </div>
+            <div id="playersList" class="players-list"></div>
+          </div>
+
+          <div class="ships-top-panel">
+            <div class="panel-heading compact-heading">
+              <h2>货船</h2>
+            </div>
+            <div id="topShips" class="top-ships"></div>
+          </div>
+        </section>
+
+        <section class="board-stage" aria-label="棋盘">
+          <div class="board-canvas">
+            <div class="board-coordinate-layer">
+              <img src="/assets/manila-board-base.png" alt="马尼拉棋盘底板" />
+              <div class="board-overlay goods-overlay" id="goodsMarket"></div>
+              <div class="board-overlay sea-overlay" id="seaLanes"></div>
+              <div class="board-overlay dock-overlay" id="dockSlots"></div>
+              <div class="board-overlay port-overlay" id="portSlots"></div>
+              <div class="board-overlay pirate-overlay" id="pirateSlots"></div>
+              <div class="board-overlay navigator-overlay" id="navigatorSlots"></div>
+              <div class="board-overlay insurance-overlay" id="insuranceSlot"></div>
+            </div>
+            <div id="routeNumbers" hidden></div>
+          </div>
+        </section>
+      </div>
+
+      <aside class="command-panel">
+        <section class="panel debug-panel">
+          <div class="debug-controls" aria-label="游戏控制">
+            <button id="newGameBtn" type="button">新局</button>
+            <button id="aiStepBtn" type="button">AI 一步</button>
+            <button id="aiRoundBtn" type="button">AI 推进</button>
+          </div>
+        </section>
+
+        <section class="panel action-panel">
+          <div class="panel-heading">
+            <h2>可行动作</h2>
+          </div>
+          <div id="contextControls" class="context-controls"></div>
+          <div id="actionsList" class="actions-list"></div>
+        </section>
+
+        <section class="panel events-panel">
+          <h2>事件</h2>
+          <div id="eventsList" class="events-list"></div>
+        </section>
+      </aside>
+    </main>
+  </div>
+
+  <div id="settlementOverlay" class="settlement-overlay" hidden></div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/board.js" defer></script>
+</body>
+</html>

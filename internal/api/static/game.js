@@ -37,6 +37,7 @@ const animationQueues = new Map();
 const wsPayloadQueue = [];
 let wsPayloadProcessing = false;
 let initialRoomLoaded = false;
+let eventsPinnedToLatest = true;
 const DEBUG_SHOW_ALL_HOTSPOTS = false;
 const DESIGN_VIEWPORT = { width: 1432, height: 828 };
 const BOARD_ANIMATION_DURATION_MS = 1500;
@@ -2857,10 +2858,62 @@ async function handleListedAction(action) {
 }
 
 function renderEvents() {
+  const list = $("eventsList");
   const events = state.events || [];
-  $("eventsList").innerHTML = events.map((event) => {
+  const previousScrollTop = list?.scrollTop || 0;
+  list.innerHTML = events.map((event) => {
     return `<div class="event">#${event.seq} ${eventName(event.type)} ${formatEventData(event)}</div>`;
   }).join("");
+  if (eventsPinnedToLatest) {
+    scrollEventsToLatest();
+  } else if (list) {
+    list.scrollTop = previousScrollTop;
+  }
+  syncEventsLatestButton();
+}
+
+function scrollEventsToLatest() {
+  const list = $("eventsList");
+  if (!list) return;
+  list.scrollTop = eventsLatestScrollTop(list);
+  eventsPinnedToLatest = true;
+  syncEventsLatestButton();
+}
+
+function handleEventsScroll() {
+  const list = $("eventsList");
+  if (!list) return;
+  if (!isEventsScrollable(list) || isEventsAtLatest(list)) {
+    eventsPinnedToLatest = true;
+  } else {
+    eventsPinnedToLatest = false;
+  }
+  syncEventsLatestButton();
+}
+
+function syncEventsLatestButton() {
+  const button = $("eventsLatestBtn");
+  const list = $("eventsList");
+  if (!button || !list) return;
+  eventsPinnedToLatest = !isEventsScrollable(list) || isEventsAtLatest(list);
+  button.hidden = eventsPinnedToLatest || !isEventsScrollable(list);
+}
+
+function scheduleEventsScrollSync() {
+  requestAnimationFrame(handleEventsScroll);
+}
+
+function isEventsScrollable(list) {
+  return Boolean(list && list.scrollHeight > list.clientHeight + 1);
+}
+
+function eventsLatestScrollTop(list) {
+  if (!isEventsScrollable(list)) return 0;
+  return Math.min(0, list.clientHeight - list.scrollHeight);
+}
+
+function isEventsAtLatest(list) {
+  return Math.abs(Number(list?.scrollTop || 0) - eventsLatestScrollTop(list)) <= 1;
 }
 
 async function submitBid(action) {
@@ -3488,6 +3541,10 @@ $("aiStepBtn").onclick = () => aiStep().catch(showError);
 $("aiRoundBtn").onclick = () => aiAdvanceRound().catch(showError);
 $("animationToggleBtn").onclick = toggleAnimations;
 $("returnLobbyBtn").onclick = returnToLobby;
+$("eventsLatestBtn").onclick = scrollEventsToLatest;
+$("eventsList").addEventListener("scroll", handleEventsScroll);
+$("eventsList").addEventListener("wheel", scheduleEventsScrollSync, { passive: true });
+$("eventsList").addEventListener("touchmove", scheduleEventsScrollSync, { passive: true });
 $("helpCloseBtn").onclick = closeHelp;
 $("helpOverlay").addEventListener("click", (event) => {
   if (event.target === $("helpOverlay")) closeHelp();

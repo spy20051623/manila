@@ -1272,6 +1272,7 @@ input {
 }
 
 .events-panel {
+  position: relative;
   border: 0;
   background: url("/assets/ui/events-panel-parchment-360x437.png") center / 100% 100% no-repeat;
   box-shadow: 0 8px 26px rgba(18, 15, 12, 0.18);
@@ -1287,6 +1288,30 @@ input {
 
 .panel-heading.compact-heading {
   margin-bottom: 4px;
+}
+
+.events-latest-button {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 2;
+  min-height: 28px;
+  border: 1px solid rgba(31, 37, 40, 0.22);
+  border-radius: 6px;
+  padding: 4px 10px;
+  color: #2a1b10;
+  background: linear-gradient(180deg, #fff8e8, #e6c896);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.7) inset,
+    0 -1px 0 rgba(74, 38, 17, 0.22) inset,
+    0 2px 7px rgba(38, 23, 12, 0.14);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.events-latest-button:hover {
+  border-color: rgba(74, 38, 17, 0.72);
+  background: linear-gradient(180deg, #fffbf0, #edce94);
 }
 
 .panel h2 {

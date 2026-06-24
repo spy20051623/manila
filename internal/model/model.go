@@ -249,3 +249,59 @@ type Score struct {
 	Wealth   int `json:"wealth"`
 	Rank     int `json:"rank"`
 }
+
+type RoomSettlement struct {
+	GameID   string  `json:"gameId,omitempty"`
+	EventSeq int     `json:"eventSeq"`
+	Scores   []Score `json:"scores"`
+}
+
+type RoomStatus string
+
+const (
+	RoomStatusWaiting    RoomStatus = "waiting"
+	RoomStatusInProgress RoomStatus = "inProgress"
+	RoomStatusClosing    RoomStatus = "closing"
+)
+
+type SeatType string
+
+const (
+	SeatTypeEmpty SeatType = "empty"
+	SeatTypeHuman SeatType = "human"
+	SeatTypeAI    SeatType = "ai"
+)
+
+type RoomSeat struct {
+	PlayerID int      `json:"playerId"`
+	Type     SeatType `json:"type"`
+	Name     string   `json:"name,omitempty"`
+	Ready    bool     `json:"ready"`
+	Online   bool     `json:"online"`
+	IsYou    bool     `json:"isYou,omitempty"`
+}
+
+type RoomParticipant struct {
+	Joined   bool   `json:"joined"`
+	PlayerID int    `json:"playerId,omitempty"`
+	Name     string `json:"name,omitempty"`
+}
+
+type RoomView struct {
+	Status           RoomStatus      `json:"status"`
+	Seats            []RoomSeat      `json:"seats"`
+	Participant      RoomParticipant `json:"participant"`
+	GameID           string          `json:"gameId,omitempty"`
+	Game             *Game           `json:"game,omitempty"`
+	EventSeq         int             `json:"eventSeq"`
+	ClosingSeconds   int             `json:"closingSeconds,omitempty"`
+	CloseReason      string          `json:"closeReason,omitempty"`
+	LastSettlement   *RoomSettlement `json:"lastSettlement,omitempty"`
+	SuggestedName    string          `json:"suggestedName,omitempty"`
+	CanManageAI      bool            `json:"canManageAI"`
+	CanReady         bool            `json:"canReady"`
+	CanCancelReady   bool            `json:"canCancelReady"`
+	CanLeaveSeat     bool            `json:"canLeaveSeat"`
+	CanAIForCurrent  bool            `json:"canAIForCurrent"`
+	HumanPlayerCount int             `json:"humanPlayerCount"`
+}

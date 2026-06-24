@@ -24,10 +24,28 @@ type Service struct {
 	engine        *rules.Engine
 	aiMu          sync.Mutex
 	aiAssignments map[string]map[int]ai.Genome
+	roomMu        sync.Mutex
+	room          roomState
+	notify        func()
+	timeoutTimer  *time.Timer
+	closeTimer    *time.Timer
+	offlineTimers map[string]*time.Timer
 }
 
 func NewService(st *store.MemoryStore, eng *rules.Engine) *Service {
-	return &Service{store: st, engine: eng, aiAssignments: map[string]map[int]ai.Genome{}}
+	return &Service{
+		store:         st,
+		engine:        eng,
+		aiAssignments: map[string]map[int]ai.Genome{},
+		room:          newRoomState(),
+		offlineTimers: map[string]*time.Timer{},
+	}
+}
+
+func (s *Service) SetNotifier(fn func()) {
+	s.roomMu.Lock()
+	defer s.roomMu.Unlock()
+	s.notify = fn
 }
 
 func (s *Service) CreateGame(seed *int64) *model.Game {

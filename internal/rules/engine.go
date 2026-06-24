@@ -88,7 +88,7 @@ func (e *Engine) LegalActions(g *model.Game, playerID int) ([]model.LegalAction,
 	if _, ok := g.Players[playerID]; !ok {
 		return nil, fmt.Errorf("unknown player %d", playerID)
 	}
-	if g.CurrentPlayer != playerID {
+	if g.Phase != model.PhaseRoundReview && g.CurrentPlayer != playerID {
 		return []model.LegalAction{}, nil
 	}
 	switch g.Phase {
@@ -119,7 +119,7 @@ func (e *Engine) ApplyAction(g *model.Game, a model.Action) error {
 	if a.ExpectedEventSeq != nil && *a.ExpectedEventSeq != g.EventSeq {
 		return fmt.Errorf("event sequence mismatch: expected %d got %d", *a.ExpectedEventSeq, g.EventSeq)
 	}
-	if g.CurrentPlayer != a.PlayerID {
+	if g.Phase != model.PhaseRoundReview && g.CurrentPlayer != a.PlayerID {
 		return fmt.Errorf("not player %d turn", a.PlayerID)
 	}
 	if g.Status == model.StatusEnded {

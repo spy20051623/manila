@@ -8,7 +8,10 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
+	"github.com/gorilla/websocket"
 	"manila/internal/ai"
 	"manila/internal/app"
 	"manila/internal/model"
@@ -19,15 +22,28 @@ import (
 var staticFiles embed.FS
 
 type Handler struct {
-	service *app.Service
+	service   *app.Service
+	clientsMu sync.Mutex
+	clients   map[*websocket.Conn]string
+	upgrader  websocket.Upgrader
 }
 
 func NewHandler(s *app.Service) *Handler {
-	return &Handler{service: s}
+	h := &Handler{
+		service: s,
+		clients: map[*websocket.Conn]string{},
+		upgrader: websocket.Upgrader{
+			CheckOrigin: func(r *http.Request) bool { return true },
+		},
+	}
+	s.SetNotifier(h.broadcastRoom)
+	return h
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.Handle("/", staticFileServer())
+	mux.HandleFunc("/room", h.handleRoom)
+	mux.HandleFunc("/room/", h.handleRoomPath)
 	mux.HandleFunc("/games", h.handleGames)
 	mux.HandleFunc("/games/", h.handleGamePath)
 	mux.HandleFunc("/debug/games/", h.handleDebugPath)
@@ -41,7 +57,7 @@ func staticFileServer() http.Handler {
 		return noCache(remapStaticPages(http.FileServer(http.Dir("internal/api/static"))))
 	}
 	static, _ := fs.Sub(staticFiles, "static")
-	return remapStaticPages(http.FileServer(http.FS(static)))
+	return noCache(remapStaticPages(http.FileServer(http.FS(static))))
 }
 
 func remapStaticPages(next http.Handler) http.Handler {
@@ -79,6 +95,183 @@ func (h *Handler) handleGames(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	g := h.service.CreateGame(req.Seed)
 	writeJSON(w, http.StatusCreated, map[string]interface{}{"game": g, "eventSeq": g.EventSeq})
+}
+
+func (h *Handler) handleRoom(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		h.respondRoom(w, r, http.StatusOK)
+	case http.MethodPost:
+		writeError(w, http.StatusNotFound, "notFound", "not found")
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "methodNotAllowed", "method not allowed")
+	}
+}
+
+func (h *Handler) handleRoomPath(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) < 2 || parts[0] != "room" {
+		writeError(w, http.StatusNotFound, "notFound", "not found")
+		return
+	}
+	token := tokenFromRequest(r)
+	switch {
+	case len(parts) == 2 && parts[1] == "state" && r.Method == http.MethodGet:
+		h.respondRoom(w, r, http.StatusOK)
+	case len(parts) == 2 && parts[1] == "join" && r.Method == http.MethodPost:
+		var req struct {
+			Name string `json:"name"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		issued, err := h.service.JoinRoom(req.Name)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "badRequest", err.Error())
+			return
+		}
+		view := h.roomViewForToken(issued)
+		writeJSON(w, http.StatusOK, map[string]interface{}{"token": issued, "room": view})
+	case len(parts) == 2 && parts[1] == "name" && r.Method == http.MethodPatch:
+		var req struct {
+			Name string `json:"name"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		h.respondRoomCommand(w, r, h.service.RenameRoomParticipant(token, req.Name))
+	case len(parts) == 2 && parts[1] == "ready" && r.Method == http.MethodPost:
+		h.respondRoomCommand(w, r, h.service.Ready(token))
+	case len(parts) == 2 && parts[1] == "unready" && r.Method == http.MethodPost:
+		h.respondRoomCommand(w, r, h.service.Unready(token))
+	case len(parts) == 2 && parts[1] == "actions" && r.Method == http.MethodGet:
+		actions, seq, err := h.service.RoomLegalActions(token)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "badRequest", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"actions": actions, "eventSeq": seq})
+	case len(parts) == 2 && parts[1] == "actions" && r.Method == http.MethodPost:
+		var action model.Action
+		if err := json.NewDecoder(r.Body).Decode(&action); err != nil {
+			writeError(w, http.StatusBadRequest, "badJson", err.Error())
+			return
+		}
+		g, err := h.service.ApplyRoomAction(token, action)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "badRequest", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"game": h.visibleGameForToken(token, g), "eventSeq": g.EventSeq})
+	case len(parts) == 2 && parts[1] == "ai-step" && r.Method == http.MethodPost:
+		g, action, err := h.service.RoomAIStep(token)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "badRequest", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"game": h.visibleGameForToken(token, g), "action": action, "eventSeq": g.EventSeq})
+	case len(parts) == 2 && parts[1] == "ai-round" && r.Method == http.MethodPost:
+		g, err := h.service.RoomAIRound(token)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "badRequest", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"game": h.visibleGameForToken(token, g), "eventSeq": g.EventSeq})
+	case len(parts) == 2 && parts[1] == "ws" && r.Method == http.MethodGet:
+		h.handleRoomWS(w, r)
+	case len(parts) == 4 && parts[1] == "seats" && parts[3] == "claim" && r.Method == http.MethodPost:
+		playerID, err := strconv.Atoi(parts[2])
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "badRequest", "invalid player id")
+			return
+		}
+		h.respondRoomCommand(w, r, h.service.ClaimSeat(token, playerID))
+	case len(parts) == 4 && parts[1] == "seats" && parts[3] == "leave" && r.Method == http.MethodPost:
+		h.respondRoomCommand(w, r, h.service.LeaveSeat(token))
+	case len(parts) == 4 && parts[1] == "seats" && parts[3] == "ai" && r.Method == http.MethodPost:
+		playerID, err := strconv.Atoi(parts[2])
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "badRequest", "invalid player id")
+			return
+		}
+		h.respondRoomCommand(w, r, h.service.PlaceAI(token, playerID))
+	case len(parts) == 4 && parts[1] == "seats" && parts[3] == "ai" && r.Method == http.MethodDelete:
+		playerID, err := strconv.Atoi(parts[2])
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "badRequest", "invalid player id")
+			return
+		}
+		h.respondRoomCommand(w, r, h.service.RemoveAI(token, playerID))
+	default:
+		writeError(w, http.StatusNotFound, "notFound", "not found")
+	}
+}
+
+func (h *Handler) respondRoomCommand(w http.ResponseWriter, r *http.Request, err error) {
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "badRequest", err.Error())
+		return
+	}
+	h.respondRoom(w, r, http.StatusOK)
+}
+
+func (h *Handler) respondRoom(w http.ResponseWriter, r *http.Request, status int) {
+	writeJSON(w, status, map[string]interface{}{"room": h.roomViewForToken(tokenFromRequest(r))})
+}
+
+func (h *Handler) roomViewForToken(token string) model.RoomView {
+	view, err := h.service.RoomView(token)
+	if err != nil {
+		return model.RoomView{Status: model.RoomStatusWaiting}
+	}
+	view.Game = h.visibleGameForToken(token, view.Game)
+	if view.Game != nil {
+		view.EventSeq = view.Game.EventSeq
+	}
+	return view
+}
+
+func (h *Handler) visibleGameForToken(token string, g *model.Game) *model.Game {
+	return gameVisibleToViewer(g, h.service.RoomPlayerID(token))
+}
+
+func (h *Handler) handleRoomWS(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("token")
+	conn, err := h.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	connected := h.service.ConnectRoomParticipant(token)
+	h.clientsMu.Lock()
+	h.clients[conn] = token
+	h.clientsMu.Unlock()
+	_ = conn.WriteJSON(map[string]interface{}{"room": h.roomViewForToken(token)})
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
+			break
+		}
+	}
+	h.clientsMu.Lock()
+	delete(h.clients, conn)
+	h.clientsMu.Unlock()
+	_ = conn.Close()
+	if connected {
+		h.service.DisconnectRoomParticipant(token)
+	}
+}
+
+func (h *Handler) broadcastRoom() {
+	h.clientsMu.Lock()
+	clients := map[*websocket.Conn]string{}
+	for conn, token := range h.clients {
+		clients[conn] = token
+	}
+	h.clientsMu.Unlock()
+	for conn, token := range clients {
+		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		if err := conn.WriteJSON(map[string]interface{}{"room": h.roomViewForToken(token)}); err != nil {
+			h.clientsMu.Lock()
+			delete(h.clients, conn)
+			h.clientsMu.Unlock()
+			_ = conn.Close()
+		}
+	}
 }
 
 func (h *Handler) handleGamePath(w http.ResponseWriter, r *http.Request) {
@@ -297,10 +490,7 @@ func respondGameForRequest(w http.ResponseWriter, r *http.Request, g *model.Game
 
 func visibleGameForRequest(r *http.Request, g *model.Game) *model.Game {
 	viewerID := viewerIDFromRequest(r)
-	if viewerID == 0 {
-		return g
-	}
-	return gameVisibleToPlayer(g, viewerID)
+	return gameVisibleToViewer(g, viewerID)
 }
 
 func viewerIDFromRequest(r *http.Request) int {
@@ -317,7 +507,7 @@ func viewerIDFromRequest(r *http.Request) int {
 	return 0
 }
 
-func gameVisibleToPlayer(g *model.Game, viewerID int) *model.Game {
+func gameVisibleToViewer(g *model.Game, viewerID int) *model.Game {
 	if g == nil {
 		return nil
 	}
@@ -331,7 +521,7 @@ func gameVisibleToPlayer(g *model.Game, viewerID int) *model.Game {
 	}
 	publicBuys := publicBoughtShares(visible.Events)
 	for playerID, player := range visible.Players {
-		if playerID == viewerID {
+		if viewerID != 0 && playerID == viewerID {
 			player.HiddenShareCount = 0
 			continue
 		}
@@ -350,6 +540,14 @@ func gameVisibleToPlayer(g *model.Game, viewerID int) *model.Game {
 		player.HiddenShareCount = maxInt(0, totalShares-knownTotal)
 	}
 	return &visible
+}
+
+func tokenFromRequest(r *http.Request) string {
+	auth := r.Header.Get("Authorization")
+	if strings.HasPrefix(auth, "Bearer ") {
+		return strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+	}
+	return r.URL.Query().Get("token")
 }
 
 func publicBoughtShares(events []model.Event) map[int]map[model.GoodsID]int {

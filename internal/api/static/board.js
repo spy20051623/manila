@@ -1,4 +1,9 @@
-let gameId = localStorage.getItem("manilaBoardGameId") || "";
+let gameId = "";
+let room = null;
+let roomToken = new URLSearchParams(window.location.search).get("token") || localStorage.getItem("manilaRoomToken") || "";
+if (roomToken) localStorage.setItem("manilaRoomToken", roomToken);
+let roomSocket = null;
+let reconnectTimer = null;
 let state = null;
 let actions = [];
 let aiBusy = false;
@@ -10,6 +15,7 @@ let dismissedSettlementKey = "";
 let actionEventSeq = null;
 const DEBUG_SHOW_ALL_HOTSPOTS = false;
 const DESIGN_VIEWPORT = { width: 1432, height: 828 };
+const MAX_PLAYER_NAME_LENGTH = 12;
 const HELP_CONTENT = {
   global: {
     title: "全局",
@@ -135,12 +141,26 @@ const HELP_CONTENT = {
 };
 
 function syncViewportScale() {
-  const scale = Math.min(window.innerWidth / DESIGN_VIEWPORT.width, window.innerHeight / DESIGN_VIEWPORT.height);
+  const viewport = window.visualViewport;
+  const viewportWidth = viewport?.width || window.innerWidth;
+  const viewportHeight = viewport?.height || window.innerHeight;
+  const offsetLeft = viewport?.offsetLeft || 0;
+  const offsetTop = viewport?.offsetTop || 0;
+  const safePad = 0;
+  const availableWidth = Math.max(1, viewportWidth - safePad * 2);
+  const availableHeight = Math.max(1, viewportHeight - safePad * 2);
+  const scale = Math.min(availableWidth / DESIGN_VIEWPORT.width, availableHeight / DESIGN_VIEWPORT.height);
+  const left = offsetLeft + Math.max(safePad, (viewportWidth - DESIGN_VIEWPORT.width * scale) / 2);
+  const top = offsetTop + Math.max(safePad, (viewportHeight - DESIGN_VIEWPORT.height * scale) / 2);
   document.documentElement.style.setProperty("--ui-scale", String(scale));
+  document.documentElement.style.setProperty("--ui-left", `${left}px`);
+  document.documentElement.style.setProperty("--ui-top", `${top}px`);
 }
 
 syncViewportScale();
 window.addEventListener("resize", syncViewportScale);
+window.visualViewport?.addEventListener("resize", syncViewportScale);
+window.visualViewport?.addEventListener("scroll", syncViewportScale);
 
 const $ = (id) => document.getElementById(id);
 const marketValues = [0, 5, 10, 20, 30];
@@ -160,8 +180,10 @@ const goodsMeta = {
 };
 
 async function api(path, options = {}) {
+  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+  if (roomToken) headers.Authorization = `Bearer ${roomToken}`;
   const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
+    headers,
     ...options,
   });
   const data = await res.json().catch(() => ({}));
@@ -169,61 +191,216 @@ async function api(path, options = {}) {
   return data;
 }
 
-function localPlayerStorageKey(id = gameId) {
-  return `manilaBoardLocalPlayer:${id || "default"}`;
-}
-
-function setLocalPlayerId(playerId, id = gameId) {
-  localStorage.setItem(localPlayerStorageKey(id), String(playerId));
-}
-
 function getLocalPlayerId() {
-  const stored = Number(localStorage.getItem(localPlayerStorageKey()) || 1);
-  return playerOrder.includes(stored) ? stored : 1;
-}
-
-function viewerQuery() {
-  return `viewerId=${getLocalPlayerId()}`;
+  return Number(room?.participant?.playerId || 0);
 }
 
 async function createGame() {
-  const created = await api("/games", { method: "POST", body: JSON.stringify({}) });
-  gameId = created.game.gameId;
-  localStorage.setItem("manilaBoardGameId", gameId);
-  setLocalPlayerId(1, gameId);
-  await api(`/games/${gameId}/start?${viewerQuery()}`, { method: "POST" });
-  resetTransientControls();
-  await refresh();
-  await maybeAutoAI();
+  await joinRoom();
+}
+
+async function joinRoom() {
+  const latest = await api("/room/state");
+  const defaultName = latest?.room?.suggestedName || room?.suggestedName || "Player 1";
+  const enteredName = await openNameDialog("加入房间", defaultName);
+  if (enteredName === null) return;
+  const joined = await api("/room/join", { method: "POST", body: JSON.stringify({ name: enteredName.trim() }) });
+  roomToken = joined.token || "";
+  localStorage.setItem("manilaRoomToken", roomToken);
+  syncTokenToURL();
+  connectRoomSocket();
+  await applyRoomPayload(joined.room);
+}
+
+async function renameRoomParticipant() {
+  const currentName = room?.participant?.name || "";
+  const enteredName = await openNameDialog("修改名字", currentName);
+  if (enteredName === null) return;
+  const renamed = await api("/room/name", { method: "PATCH", body: JSON.stringify({ name: enteredName.trim() }) });
+  await applyRoomPayload(renamed.room);
+}
+
+function openNameDialog(title, defaultName) {
+  return new Promise((resolve) => {
+    const overlay = $("nameDialogOverlay");
+    const form = $("nameDialogForm");
+    const input = $("nameDialogInput");
+    const counter = $("nameDialogCounter");
+    const finish = (value) => {
+      overlay.hidden = true;
+      form.onsubmit = null;
+      $("nameDialogCancelBtn").onclick = null;
+      $("nameDialogCloseBtn").onclick = null;
+      overlay.onclick = null;
+      input.oninput = null;
+      document.removeEventListener("keydown", onKeyDown);
+      resolve(value);
+    };
+    const updateCounter = () => {
+      counter.textContent = `${Array.from(input.value).length}/${MAX_PLAYER_NAME_LENGTH}`;
+    };
+    const onKeyDown = (event) => {
+      if (event.key === "Escape" && !overlay.hidden) finish(null);
+    };
+
+    $("nameDialogTitle").textContent = title;
+    input.value = defaultName || "";
+    input.maxLength = MAX_PLAYER_NAME_LENGTH;
+    updateCounter();
+    input.oninput = updateCounter;
+    form.onsubmit = (event) => {
+      event.preventDefault();
+      finish(input.value);
+    };
+    $("nameDialogCancelBtn").onclick = () => finish(null);
+    $("nameDialogCloseBtn").onclick = () => finish(null);
+    overlay.onclick = (event) => {
+      if (event.target === overlay) finish(null);
+    };
+    document.addEventListener("keydown", onKeyDown);
+    overlay.hidden = false;
+    requestAnimationFrame(() => {
+      input.focus();
+      input.select();
+    });
+  });
+}
+
+function syncTokenToURL() {
+  if (!roomToken) return;
+  const url = new URL(window.location.href);
+  url.searchParams.set("token", roomToken);
+  window.history.replaceState({}, "", url);
+}
+
+function clearRoomToken() {
+  if (!roomToken) return;
+  roomToken = "";
+  localStorage.removeItem("manilaRoomToken");
+  const url = new URL(window.location.href);
+  url.searchParams.delete("token");
+  window.history.replaceState({}, "", url);
+  connectRoomSocket();
 }
 
 async function refresh(options = {}) {
-  if (!gameId) {
-    renderEmpty();
-    return;
-  }
-  const data = await api(`/games/${gameId}/state?${viewerQuery()}`);
-  state = data.game;
-  const loadedEventSeq = await loadLegalActions();
-  if (state && loadedEventSeq !== null && loadedEventSeq !== state.eventSeq) {
-    const latest = await api(`/games/${gameId}/state?${viewerQuery()}`);
-    state = latest.game;
-    await loadLegalActions();
-  }
-  syncTransientControls();
-  render();
+  const data = await api("/room/state");
+  await applyRoomPayload(data.room);
   if (options.auto !== false) {
-    setTimeout(() => maybeAutoAI().catch(showError), 120);
+    setTimeout(() => loadLegalActions().then(renderRoom).catch(showError), 120);
   }
+}
+
+async function applyRoomPayload(nextRoom) {
+  room = nextRoom || null;
+  state = room?.game || null;
+  gameId = state?.gameId || room?.gameId || "";
+  if (room?.participant?.joined) {
+    syncTokenToURL();
+  } else {
+    clearRoomToken();
+  }
+  resetTransientControls();
+  await loadLegalActions();
+  syncTransientControls();
+  renderRoom();
+}
+
+function connectRoomSocket() {
+  clearTimeout(reconnectTimer);
+  if (roomSocket) {
+    roomSocket.onclose = null;
+    roomSocket.close();
+  }
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const url = `${protocol}//${window.location.host}/room/ws?token=${encodeURIComponent(roomToken || "")}`;
+  roomSocket = new WebSocket(url);
+  roomSocket.onmessage = (event) => {
+    const data = JSON.parse(event.data || "{}");
+    applyRoomPayload(data.room).catch(showError);
+  };
+  roomSocket.onclose = () => {
+    reconnectTimer = setTimeout(connectRoomSocket, 1200);
+  };
+}
+
+function renderRoom() {
+  const lobby = $("lobbyOverlay");
+  const app = document.querySelector(".app-shell");
+  const inGame = room && state && room.status === "inProgress";
+  if (lobby) lobby.hidden = Boolean(inGame);
+  if (app) app.hidden = !inGame;
+  if (inGame) {
+    render();
+    setBusyButtons(false);
+  } else {
+    renderEmpty();
+    renderLobby();
+  }
+}
+
+function renderLobby(resetView = false) {
+  const joined = Boolean(room?.participant?.joined);
+  const playerId = resetView ? 0 : Number(room?.participant?.playerId || 0);
+  $("lobbyJoinBtn").hidden = joined;
+  $("lobbyRenameBtn").hidden = !joined;
+  const displayName = room?.participant?.name || "";
+  $("lobbyJoinedText").textContent = joined ? (playerId ? `${displayName} \u00b7 P${playerId}` : `${displayName} \u00b7 \u5c1a\u672a\u9009\u62e9\u5ea7\u4f4d`) : "\u89c2\u6218\u8eab\u4efd";
+  $("lobbyStatusText").textContent = resetView ? "\u51c6\u5907\u5927\u5385" : roomStatusText();
+  $("lobbySeats").innerHTML = playerOrder.map((id) => lobbySeatHTML(id, resetView)).join("");
+  $("lobbySeats").querySelectorAll("[data-room-action]").forEach((button) => {
+    button.onclick = () => handleLobbyAction(button.dataset.roomAction, Number(button.dataset.playerId)).catch(showError);
+  });
+}
+
+function lobbySeatHTML(id, resetView = false) {
+  const seat = resetView ? { playerId: id, type: "empty" } : ((room?.seats || []).find((item) => Number(item.playerId) === id) || { playerId: id, type: "empty" });
+  const joined = Boolean(room?.participant?.joined);
+  const seated = resetView ? 0 : Number(room?.participant?.playerId || 0);
+  const canManageAI = !resetView && Boolean(room?.canManageAI);
+  const isYou = !resetView && Boolean(seat.isYou);
+  const online = seat.type !== "human" || seat.online !== false;
+  const label = seat.type === "human" ? (seat.name || (isYou ? "\u4f60" : "\u771f\u4eba")) : seat.type === "ai" ? "AI" : "\u7a7a\u4f4d";
+  const ready = seat.type === "human" ? (!online ? "\u79bb\u7ebf" : (seat.ready ? "\u5df2\u51c6\u5907" : "\u672a\u51c6\u5907")) : seat.type === "ai" ? "\u81ea\u52a8\u51c6\u5907" : "\u7b49\u5f85";
+  const controls = [];
+  if (!resetView) {
+    if (joined && seat.type === "empty" && !seated) controls.push(`<button data-room-action="claim" data-player-id="${id}" type="button">\u9009\u62e9</button>`);
+    if (joined && seat.type === "empty" && seated && !room?.canCancelReady) controls.push(`<button data-room-action="claim" data-player-id="${id}" type="button">\u5207\u6362</button>`);
+    if (isYou && room?.canReady) controls.push(`<button data-room-action="ready" data-player-id="${id}" type="button">\u51c6\u5907</button>`);
+    if (isYou && room?.canCancelReady) controls.push(`<button data-room-action="unready" data-player-id="${id}" type="button">\u53d6\u6d88\u51c6\u5907</button>`);
+    if (isYou && room?.canLeaveSeat) controls.push(`<button data-room-action="leave" data-player-id="${id}" type="button">\u653e\u5f03\u5ea7\u4f4d</button>`);
+    if (canManageAI && seat.type === "empty") controls.push(`<button data-room-action="addAI" data-player-id="${id}" type="button">\u653e\u7f6e AI</button>`);
+    if (canManageAI && seat.type === "ai") controls.push(`<button data-room-action="removeAI" data-player-id="${id}" type="button">\u64a4\u9500 AI</button>`);
+  }
+  return `<article class="lobby-seat ${seat.type} ${isYou ? "you" : ""} ${online ? "" : "offline"}">
+    <div class="lobby-seat-head"><span>P${id}</span><strong>${label}</strong></div>
+    <div class="lobby-seat-state">${ready}</div>
+    <div class="lobby-seat-actions">${controls.join("")}</div>
+  </article>`;
+}
+
+async function handleLobbyAction(action, playerId) {
+  if (action === "claim") await api(`/room/seats/${playerId}/claim`, { method: "POST" });
+  if (action === "leave") await api(`/room/seats/${playerId}/leave`, { method: "POST" });
+  if (action === "ready") await api("/room/ready", { method: "POST" });
+  if (action === "unready") await api("/room/unready", { method: "POST" });
+  if (action === "addAI") await api(`/room/seats/${playerId}/ai`, { method: "POST" });
+  if (action === "removeAI") await api(`/room/seats/${playerId}/ai`, { method: "DELETE" });
+  await refresh();
+}
+
+function roomStatusText() {
+  if (!room) return "\u6b63\u5728\u8fde\u63a5\u623f\u95f4";
+  if (room.status === "waiting") return "\u51c6\u5907\u5927\u5385";
+  if (room.status === "closing") return `${room.closeReason || "\u623f\u95f4\u5173\u95ed\u4e2d"} \u00b7 ${room.closingSeconds || 0}s`;
+  return "\u5bf9\u5c40\u8fdb\u884c\u4e2d";
 }
 
 async function loadLegalActions() {
   actions = [];
   actionEventSeq = state?.eventSeq ?? null;
-  if (!state || !state.currentPlayer || state.status === "ended") return actionEventSeq;
-  const localPlayerId = getLocalPlayerId();
-  if (Number(state.currentPlayer) !== localPlayerId) return actionEventSeq;
-  const data = await api(`/games/${gameId}/players/${localPlayerId}/actions?${viewerQuery()}`);
+  if (!state || state.status === "ended") return actionEventSeq;
+  const data = await api("/room/actions");
   actions = data.actions || [];
   actionEventSeq = data.eventSeq ?? actionEventSeq;
   return actionEventSeq;
@@ -232,7 +409,7 @@ async function loadLegalActions() {
 async function submitAction(action, payloadOverride) {
   if (!state || !action) return;
   const localPlayerId = getLocalPlayerId();
-  if (Number(state.currentPlayer) !== localPlayerId) {
+  if (state.phase !== "RoundReview" && Number(state.currentPlayer) !== localPlayerId) {
     showToast(`等待 P${state.currentPlayer} 行动。`);
     return;
   }
@@ -243,70 +420,31 @@ async function submitAction(action, payloadOverride) {
     payload,
     expectedEventSeq: actionEventSeq ?? state.eventSeq,
   };
-  await api(`/games/${gameId}/actions?${viewerQuery()}`, { method: "POST", body: JSON.stringify(requestBody) });
+  await api("/room/actions", { method: "POST", body: JSON.stringify(requestBody) });
   resetTransientControls();
   await refresh();
 }
 
 async function aiStep() {
-  if (!state || !state.currentPlayer || aiBusy) return;
+  if (!room?.canAIForCurrent || aiBusy) return;
   aiBusy = true;
   setBusyButtons(true);
   try {
-    await api(`/games/${gameId}/players/${state.currentPlayer}/trained-ai?${viewerQuery()}`, { method: "POST" });
-    const data = await api(`/games/${gameId}/state?${viewerQuery()}`);
-    state = data.game;
-    await loadLegalActions();
-    syncTransientControls();
-    render();
-    await runAIOpponentsUntilHuman(80);
+    await api("/room/ai-step", { method: "POST" });
+    await refresh();
   } finally {
     aiBusy = false;
     setBusyButtons(false);
-  }
-}
-
-async function aiStepInternal() {
-  await api(`/games/${gameId}/players/${state.currentPlayer}/trained-ai?${viewerQuery()}`, { method: "POST" });
-  const data = await api(`/games/${gameId}/state?${viewerQuery()}`);
-  state = data.game;
-  await loadLegalActions();
-  syncTransientControls();
-  render();
-}
-
-async function maybeAutoAI() {
-  if (aiBusy || !state || state.status === "ended") return;
-  if (![2, 3, 4].includes(Number(state.currentPlayer))) return;
-  aiBusy = true;
-  setBusyButtons(true);
-  try {
-    await runAIOpponentsUntilHuman(80);
-  } finally {
-    aiBusy = false;
-    setBusyButtons(false);
-  }
-}
-
-async function runAIOpponentsUntilHuman(maxSteps) {
-  for (let i = 0; i < maxSteps; i++) {
-    if (!state || state.status === "ended" || ![2, 3, 4].includes(Number(state.currentPlayer))) break;
-    await aiStepInternal();
   }
 }
 
 async function aiAdvanceRound() {
-  if (!state || aiBusy) return;
+  if (!room?.canAIForCurrent || aiBusy) return;
   aiBusy = true;
   setBusyButtons(true);
-  let leftStartingReview = state.phase !== "RoundReview";
   try {
-    for (let i = 0; i < 600; i++) {
-      if (!state || state.status === "ended" || !state.currentPlayer) break;
-      if (state.phase === "RoundReview" && leftStartingReview) break;
-      await aiStepInternal();
-      if (state.phase !== "RoundReview") leftStartingReview = true;
-    }
+    await api("/room/ai-round", { method: "POST" });
+    await refresh();
   } finally {
     aiBusy = false;
     setBusyButtons(false);
@@ -361,8 +499,9 @@ function renderEmpty() {
 
 function renderSettlementOverlay() {
   const overlay = $("settlementOverlay");
-  const scores = finalScoresForDisplay();
-  const key = scores.length ? `${state?.gameId || ""}:${state?.eventSeq || ""}:settlement` : "";
+  const settlement = settlementForDisplay();
+  const scores = settlement?.scores || [];
+  const key = currentSettlementKey();
   if (!scores.length || key === dismissedSettlementKey) {
     overlay.hidden = true;
     overlay.innerHTML = "";
@@ -391,10 +530,35 @@ function renderSettlementOverlay() {
         `).join("")}
       </section>
     </div>`;
-  overlay.querySelector(".settlement-close")?.addEventListener("click", () => {
-    dismissedSettlementKey = key;
-    overlay.hidden = true;
-  });
+  overlay.querySelector(".settlement-close")?.addEventListener("click", () => closeSettlementOverlay(key));
+}
+
+function currentSettlementKey() {
+  const settlement = settlementForDisplay();
+  return settlement?.scores?.length ? `${settlement.gameId || ""}:${settlement.eventSeq || ""}:settlement` : "";
+}
+
+function closeSettlementOverlay(key) {
+  dismissedSettlementKey = key;
+  renderRoom();
+}
+
+function settlementForDisplay() {
+  const settlement = room?.lastSettlement;
+  if (settlement && Array.isArray(settlement.scores) && settlement.scores.length) {
+    return {
+      gameId: settlement.gameId || "",
+      eventSeq: settlement.eventSeq || 0,
+      scores: [...settlement.scores].sort(compareScores),
+    };
+  }
+  const scores = finalScoresForDisplay();
+  if (!scores.length) return null;
+  return {
+    gameId: state?.gameId || "",
+    eventSeq: state?.eventSeq || 0,
+    scores,
+  };
 }
 
 function finalScoresForDisplay() {
@@ -669,13 +833,26 @@ function slotLabelsHTML(labels = []) {
   return `<div class="slot-labels">${labels.map((label) => `<span class="slot-label ${label.type}">${label.text}</span>`).join("")}</div>`;
 }
 
+
+function playerDisplayName(playerId) {
+  const seat = (room?.seats || []).find((item) => Number(item.playerId) === Number(playerId));
+  if (seat?.type === "human" && seat.name) return seat.name;
+  if (seat?.type === "ai") return `AI P${playerId}`;
+  return `P${playerId}`;
+}
+
+function playerNameHTML(playerId) {
+  const name = playerDisplayName(playerId);
+  return `<span class="player-title">${pieceHTML({ playerId })}<span class="player-display-name" title="${escapeAttr(name)}">${escapeHTML(name)}</span></span>`;
+}
+
 function renderPlayers() {
   const players = playerOrder.map((id) => state.players?.[id]).filter(Boolean);
   $("playersList").innerHTML = players.map((player) => {
     const current = Number(state.currentPlayer) === Number(player.playerId);
     return `<article class="player-card ${current ? "current" : ""}">
       <div class="player-head">
-        <span>${pieceHTML({ playerId: player.playerId })} 玩家 ${player.playerId}</span>
+        ${playerNameHTML(player.playerId)}
         <span>${player.cash} 比索</span>
       </div>
       <div class="player-stats">可用同伙 ${player.availableAccomplices} · 已放置 ${player.placedAccomplices} · 抵押 ${player.mortgagedShareCount || 0}${player.bankruptThisRound ? " · 本轮破产" : ""}</div>
@@ -690,7 +867,7 @@ function renderPlayersCompact() {
     const current = Number(state.currentPlayer) === Number(player.playerId);
     return `<article class="player-card ${current ? "current" : ""}">
       <div class="player-head">
-        <span>${pieceHTML({ playerId: player.playerId })} P${player.playerId}</span>
+        ${playerNameHTML(player.playerId)}
         <span>${player.cash} 比索</span>
       </div>
       <div class="share-line">${shareSummary(player)}</div>
@@ -1463,8 +1640,10 @@ function shipStatusName(status) {
 }
 
 function setBusyButtons(isBusy) {
-  $("aiStepBtn").disabled = isBusy;
-  $("aiRoundBtn").disabled = isBusy;
+  const disabled = isBusy || !room?.canAIForCurrent;
+  $("aiStepBtn").disabled = disabled;
+  $("aiRoundBtn").disabled = disabled;
+  $("newGameBtn").disabled = Boolean(room?.participant?.joined);
 }
 
 function showError(err) {
@@ -1503,9 +1682,11 @@ function escapeAttr(value) {
   return String(value).replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;");
 }
 
-$("newGameBtn").onclick = () => createGame().catch(showError);
+$("newGameBtn").onclick = () => joinRoom().catch(showError);
 $("aiStepBtn").onclick = () => aiStep().catch(showError);
 $("aiRoundBtn").onclick = () => aiAdvanceRound().catch(showError);
+$("lobbyJoinBtn").onclick = () => joinRoom().catch(showError);
+$("lobbyRenameBtn").onclick = () => renameRoomParticipant().catch(showError);
 $("helpCloseBtn").onclick = closeHelp;
 $("helpOverlay").addEventListener("click", (event) => {
   if (event.target === $("helpOverlay")) closeHelp();
@@ -1521,4 +1702,5 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") closeHelp();
 });
 
-refresh().catch(() => renderEmpty());
+connectRoomSocket();
+refresh().catch(() => renderRoom());

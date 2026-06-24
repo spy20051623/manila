@@ -335,6 +335,27 @@ func TestRoundReviewRequiresAllPlayersToConfirm(t *testing.T) {
 	}
 }
 
+func TestRoundReviewAllowsParallelConfirm(t *testing.T) {
+	e, g := readyForPlacement(t)
+	e.beginRoundReview(g)
+	acts, err := e.LegalActions(g, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(acts) != 1 || acts[0].Type != model.ActionConfirmRound {
+		t.Fatalf("expected player 3 can confirm while current hint is %d, got %+v", g.CurrentPlayer, acts)
+	}
+	if err := e.ApplyAction(g, model.Action{PlayerID: 3, Type: model.ActionConfirmRound}); err != nil {
+		t.Fatal(err)
+	}
+	if !g.Round.ConfirmedPlayers[3] {
+		t.Fatal("player 3 should be confirmed")
+	}
+	if g.Phase != model.PhaseRoundReview {
+		t.Fatalf("should stay in review until everyone confirms, got %s", g.Phase)
+	}
+}
+
 func TestScriptedLegalActionsCanAdvanceManySteps(t *testing.T) {
 	e := NewEngine()
 	g := NewGame("sim", 9)

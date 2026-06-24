@@ -442,7 +442,7 @@ func (s *Service) RoomAIRound(token string) (*model.Game, error) {
 		go s.processRoomAutomation()
 		return g, nil
 	}
-	if ref.Game.CurrentPlayer != playerID {
+	if roomActorForPhase(ref.Game) != playerID {
 		ref.Mu.Unlock()
 		return nil, fmt.Errorf("not player %d turn", playerID)
 	}
@@ -613,7 +613,7 @@ func (s *Service) processRoomAutomationStep() (bool, bool) {
 		}
 		s.activatePendingAILocked()
 	}
-	current := g.CurrentPlayer
+	current := roomActorForPhase(g)
 	if !validPlayerID(current) {
 		ref.Mu.Unlock()
 		s.roomMu.Unlock()
@@ -663,7 +663,7 @@ func (s *Service) applyAIForHumanSeat(playerID int, allowRoundTakeover bool) (*m
 		return nil, model.Action{}, fmt.Errorf("game not found")
 	}
 	ref.Mu.Lock()
-	if ref.Game.CurrentPlayer != playerID {
+	if roomActorForPhase(ref.Game) != playerID {
 		ref.Mu.Unlock()
 		s.roomMu.Unlock()
 		return nil, model.Action{}, fmt.Errorf("not player %d turn", playerID)
@@ -790,7 +790,7 @@ func (s *Service) applyTimeoutAI(playerID int, eventSeq int) {
 		return
 	}
 	ref.Mu.Lock()
-	if ref.Game.CurrentPlayer != playerID || ref.Game.EventSeq != eventSeq || s.room.Seats[playerID].Type != model.SeatTypeHuman {
+	if roomActorForPhase(ref.Game) != playerID || ref.Game.EventSeq != eventSeq || s.room.Seats[playerID].Type != model.SeatTypeHuman {
 		ref.Mu.Unlock()
 		s.roomMu.Unlock()
 		return
@@ -1095,7 +1095,16 @@ func (s *Service) canAIForCurrentLocked(playerID int) bool {
 	if ref.Game.Phase == model.PhaseRoundReview {
 		return ref.Game.Round.ConfirmedPlayers == nil || !ref.Game.Round.ConfirmedPlayers[playerID]
 	}
-	return ref.Game.CurrentPlayer == playerID
+	return roomActorForPhase(ref.Game) == playerID
+}
+
+func roomActorForPhase(g *model.Game) int {
+	switch g.Phase {
+	case model.PhaseHarborMasterBuyShare, model.PhaseHarborMasterSelectGoods, model.PhaseHarborMasterSetShips:
+		return g.HarborMaster
+	default:
+		return g.CurrentPlayer
+	}
 }
 
 func (s *Service) allSeatsReadyLocked() bool {

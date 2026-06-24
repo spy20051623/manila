@@ -130,6 +130,47 @@ func TestNoSlotStowawayDoesNotOccupyAndCopiesPayout(t *testing.T) {
 	}
 }
 
+func TestShipPlacementEventIncludesOccupiedSlot(t *testing.T) {
+	e, g := readyForPlacement(t)
+	acts, err := e.LegalActions(g, g.CurrentPlayer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var chosen model.LegalAction
+	for _, act := range acts {
+		if act.Type == model.ActionPlaceAccomplice && act.Payload["positionType"] == "ship" {
+			chosen = act
+			break
+		}
+	}
+	if chosen.Type == "" {
+		t.Fatalf("expected a ship placement action, got %+v", acts)
+	}
+	gid, err := goodsFromAny(chosen.Payload["targetId"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedSlot := len(g.Ships[gid].Occupants)
+	if err := e.ApplyAction(g, model.Action{PlayerID: g.CurrentPlayer, Type: model.ActionPlaceAccomplice, Payload: chosen.Payload}); err != nil {
+		t.Fatal(err)
+	}
+	ev := g.Events[len(g.Events)-1]
+	if ev.Type != "AccomplicePlaced" {
+		t.Fatalf("expected AccomplicePlaced event, got %s", ev.Type)
+	}
+	if ev.Data["positionType"] != "ship" {
+		t.Fatalf("expected ship placement event, got %+v", ev.Data)
+	}
+	slot, err := toInt(ev.Data["slot"])
+	if err != nil || slot != expectedSlot {
+		t.Fatalf("expected slot %d, got %+v", expectedSlot, ev.Data)
+	}
+	boardingSlot, err := toInt(ev.Data["boardingSlot"])
+	if err != nil || boardingSlot != expectedSlot+1 {
+		t.Fatalf("expected boardingSlot %d, got %+v", expectedSlot+1, ev.Data)
+	}
+}
+
 func TestPirateBoardingMarksPirateBoardedAndKeepsMateRole(t *testing.T) {
 	e, g := readyForPlacement(t)
 	g.Board.Pirates = []model.Piece{{PlayerID: 1, Role: "captain"}, {PlayerID: 2, Role: "mate"}}
@@ -148,6 +189,18 @@ func TestPirateBoardingMarksPirateBoardedAndKeepsMateRole(t *testing.T) {
 	}
 	if got := g.Ships[model.GoodsGinseng].Occupants[len(g.Ships[model.GoodsGinseng].Occupants)-1]; got.PlayerID != 1 || got.Role != "boardedPirate" {
 		t.Fatalf("captain should be marked as boarded pirate on ship, got %+v", got)
+	}
+	ev := g.Events[len(g.Events)-1]
+	if ev.Type != "PirateBoarded" {
+		t.Fatalf("expected PirateBoarded event, got %s", ev.Type)
+	}
+	slot, err := toInt(ev.Data["slot"])
+	if err != nil || slot != 0 {
+		t.Fatalf("expected pirate boarding slot 0, got %+v", ev.Data)
+	}
+	boardingSlot, err := toInt(ev.Data["boardingSlot"])
+	if err != nil || boardingSlot != 1 {
+		t.Fatalf("expected pirate boardingSlot 1, got %+v", ev.Data)
 	}
 }
 
@@ -373,6 +426,30 @@ func TestScriptedLegalActionsCanAdvanceManySteps(t *testing.T) {
 	}
 	if g.EventSeq == 0 {
 		t.Fatal("simulation produced no events")
+	}
+}
+
+func TestHarborMasterSetShipsUsesHarborMasterAsActor(t *testing.T) {
+	e, g := readyForPlacement(t)
+	g.Phase = model.PhaseHarborMasterSetShips
+	g.HarborMaster = 2
+	g.CurrentPlayer = 4
+	g.Round.SelectedGoods = []model.GoodsID{model.GoodsGinseng, model.GoodsNutmeg, model.GoodsSilk}
+	g.Ships = map[model.GoodsID]*model.Ship{
+		model.GoodsGinseng: {ID: model.GoodsGinseng, GoodsID: model.GoodsGinseng, RouteIndex: 1, Status: model.ShipSailing},
+		model.GoodsNutmeg:  {ID: model.GoodsNutmeg, GoodsID: model.GoodsNutmeg, RouteIndex: 2, Status: model.ShipSailing},
+		model.GoodsSilk:    {ID: model.GoodsSilk, GoodsID: model.GoodsSilk, RouteIndex: 3, Status: model.ShipSailing},
+	}
+
+	acts, err := e.LegalActions(g, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(acts) != 1 || acts[0].Type != model.ActionSetShipStarts {
+		t.Fatalf("expected harbor master can set ship starts, got %+v", acts)
+	}
+	if err := e.ApplyAction(g, model.Action{PlayerID: 2, Type: model.ActionSetShipStarts, Payload: map[string]interface{}{"starts": map[string]interface{}{"1": 3, "2": 3, "3": 3}}}); err != nil {
+		t.Fatalf("harbor master should act even if currentPlayer differs: %v", err)
 	}
 }
 

@@ -124,7 +124,7 @@ func (s *Service) ApplyRandomAI(id string, playerID int) (*model.Game, model.Act
 	}
 	ref.Mu.Lock()
 	defer ref.Mu.Unlock()
-	if ref.Game.CurrentPlayer != playerID {
+	if roomActorForPhase(ref.Game) != playerID {
 		return nil, model.Action{}, fmt.Errorf("not player %d turn", playerID)
 	}
 	action, err := s.randomAction(ref.Game, playerID)
@@ -144,7 +144,7 @@ func (s *Service) ApplyTrainedAI(id string, playerID int) (*model.Game, model.Ac
 	}
 	ref.Mu.Lock()
 	defer ref.Mu.Unlock()
-	if ref.Game.CurrentPlayer != playerID {
+	if roomActorForPhase(ref.Game) != playerID {
 		return nil, model.Action{}, fmt.Errorf("not player %d turn", playerID)
 	}
 	genome, err := s.trainedGenomeForPlayer(ref.Game, playerID)

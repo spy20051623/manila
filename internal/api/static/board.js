@@ -1,5 +1,6 @@
 let gameId = "";
 let room = null;
+const DISMISSED_SETTLEMENTS_KEY = "manilaDismissedSettlements";
 let roomToken = new URLSearchParams(window.location.search).get("token") || localStorage.getItem("manilaRoomToken") || "";
 if (roomToken) localStorage.setItem("manilaRoomToken", roomToken);
 let roomSocket = null;
@@ -11,11 +12,27 @@ let selectedGoods = new Set();
 let shipStarts = {};
 let navigatorMoves = {};
 let toastTimer = null;
-let dismissedSettlementKey = "";
+let dismissedSettlementKeys = loadDismissedSettlementKeys();
 let actionEventSeq = null;
+let actionInputLocked = false;
+let pendingSubmittedAction = null;
+let animationsEnabled = localStorage.getItem("manilaAnimationsEnabled") !== "false";
+let animationSnapshot = null;
+let animationGameId = "";
+let currentEventRecords = [];
+let deferredRenderRoom = null;
+let deferredRenderApplying = false;
+let playedAnimationGameId = "";
+const playedAnimationEvents = new Set();
+const activeAnimations = new Map();
+const animationQueues = new Map();
+const wsPayloadQueue = [];
+let wsPayloadProcessing = false;
+let initialRoomLoaded = false;
 const DEBUG_SHOW_ALL_HOTSPOTS = false;
 const DESIGN_VIEWPORT = { width: 1432, height: 828 };
 const MAX_PLAYER_NAME_LENGTH = 12;
+const BOARD_ANIMATION_DURATION_MS = 1500;
 const HELP_CONTENT = {
   global: {
     title: "全局",
@@ -285,13 +302,110 @@ function clearRoomToken() {
 
 async function refresh(options = {}) {
   const data = await api("/room/state");
-  await applyRoomPayload(data.room);
+  clearActiveAnimations(true);
+  wsPayloadQueue.length = 0;
+  await applyRoomPayload(data.room, { animate: false });
+  initialRoomLoaded = true;
   if (options.auto !== false) {
-    setTimeout(() => loadLegalActions().then(renderRoom).catch(showError), 120);
+    setTimeout(() => loadLegalActions().then(renderPostActionControls).catch(showError), 120);
   }
 }
 
-async function applyRoomPayload(nextRoom) {
+async function applyRoomPayload(nextRoom, options = {}) {
+  const animate = Boolean(options.animate);
+  const nextEvents = eventRecordsFromGame(nextRoom?.game || null);
+  if (isDuplicateInGamePayload(nextRoom)) {
+    if (animate) {
+      if (eventsArePrefix(nextEvents, currentEventRecords)) {
+        if (nextEvents.length === currentEventRecords.length) {
+          deferredRenderRoom = nextRoom || deferredRenderRoom;
+          if (!hasActiveOrQueuedAnimations()) scheduleDeferredRenderFlush();
+        }
+      } else {
+        deferredRenderRoom = null;
+        clearActiveAnimations(true);
+        console.info("已重绘");
+      }
+      syncAnimationToggleButton();
+      setBusyButtons(false);
+      return;
+    }
+    room = nextRoom || null;
+    state = room?.game || null;
+    gameId = state?.gameId || room?.gameId || "";
+    currentEventRecords = eventRecordsFromGame(state);
+    if (room?.participant?.joined) {
+      syncTokenToURL();
+    } else {
+      clearRoomToken();
+    }
+    await loadLegalActions();
+    syncTransientControls();
+    renderRoom();
+    animationSnapshot = captureAnimationSnapshot();
+    syncAnimationToggleButton();
+    setBusyButtons(false);
+    return;
+  }
+  const previousSnapshot = animationSnapshot;
+  const previousEvents = currentEventRecords;
+  const nextSnapshot = captureAnimationSnapshotFromRoom(nextRoom);
+  const sameAnimationGame = previousSnapshot
+    && nextSnapshot
+    && previousSnapshot.gameId === nextSnapshot.gameId;
+  const incomingAlreadySeen = animate
+    && sameAnimationGame
+    && eventsArePrefix(nextEvents, previousEvents);
+  if (incomingAlreadySeen) {
+    if (nextEvents.length === previousEvents.length) {
+      deferredRenderRoom = nextRoom || deferredRenderRoom;
+      if (!hasActiveOrQueuedAnimations()) scheduleDeferredRenderFlush();
+    }
+    syncAnimationToggleButton();
+    setBusyButtons(false);
+    return;
+  }
+  const eventRecordsMismatch = animate
+    && sameAnimationGame
+    && !eventsArePrefix(previousEvents, nextEvents);
+  const canAnimateIncrementally = animate
+    && sameAnimationGame
+    && eventsArePrefix(previousEvents, nextEvents);
+  if (canAnimateIncrementally) {
+    if (leftRoundReviewTransition(previousSnapshot, nextSnapshot)) {
+      deferredRenderRoom = null;
+      clearActiveAnimations(true);
+      await applyRoomPayload(nextRoom, { animate: false });
+      return;
+    }
+    deferredRenderRoom = nextRoom || null;
+    await enqueueNewEventAnimations(previousEvents, nextEvents, previousSnapshot, nextSnapshot);
+    animationSnapshot = nextSnapshot;
+    currentEventRecords = nextEvents;
+    setBusyButtons(false);
+    if (!hasActiveOrQueuedAnimations()) scheduleDeferredRenderFlush();
+    return;
+  }
+  const canBootstrapAnimations = animate
+    && !previousSnapshot
+    && nextSnapshot
+    && nextRoom?.status === "inProgress"
+    && nextEvents.length > 0;
+  if (canBootstrapAnimations) {
+    deferredRenderRoom = nextRoom || null;
+    const initialSnapshot = createInitialAnimationSnapshot(nextSnapshot);
+    await enqueueNewEventAnimations([], nextEvents, initialSnapshot, nextSnapshot);
+    animationSnapshot = nextSnapshot;
+    currentEventRecords = nextEvents;
+    setBusyButtons(false);
+    if (!hasActiveOrQueuedAnimations()) scheduleDeferredRenderFlush();
+    return;
+  }
+  if (animate) {
+    deferredRenderRoom = null;
+    clearActiveAnimations(true);
+    if (eventRecordsMismatch) console.info("已重绘");
+  }
   room = nextRoom || null;
   state = room?.game || null;
   gameId = state?.gameId || room?.gameId || "";
@@ -301,9 +415,860 @@ async function applyRoomPayload(nextRoom) {
     clearRoomToken();
   }
   resetTransientControls();
-  await loadLegalActions();
+  if (animate) {
+    actions = [];
+    actionEventSeq = state?.eventSeq ?? null;
+  } else {
+    await loadLegalActions();
+  }
   syncTransientControls();
   renderRoom();
+  animationSnapshot = captureAnimationSnapshot();
+  currentEventRecords = nextEvents;
+  if (animate) {
+    loadLegalActions().then(renderPostActionControls).catch(showError);
+  }
+}
+
+function isDuplicateInGamePayload(nextRoom) {
+  const nextState = nextRoom?.game || null;
+  if (!room || !state || !nextRoom || !nextState) return false;
+  if (room.status !== "inProgress" || nextRoom.status !== "inProgress") return false;
+  if ((state.gameId || "") !== (nextState.gameId || "")) return false;
+  return Number(state.eventSeq || 0) === Number(nextState.eventSeq || 0);
+}
+
+function enqueueWSPayload(nextRoom) {
+  if (!initialRoomLoaded) return;
+  wsPayloadQueue.push(nextRoom);
+  if (!wsPayloadProcessing) processWSPayloadQueue().catch(showError);
+}
+
+async function processWSPayloadQueue() {
+  wsPayloadProcessing = true;
+  try {
+    while (wsPayloadQueue.length) {
+      const nextRoom = wsPayloadQueue.shift();
+      await applyRoomPayload(nextRoom, { animate: true });
+    }
+  } finally {
+    wsPayloadProcessing = false;
+  }
+}
+
+function eventRecordsFromGame(game) {
+  return Array.isArray(game?.events) ? game.events : [];
+}
+
+function eventsArePrefix(prefix, full) {
+  if (!Array.isArray(prefix) || !Array.isArray(full)) return false;
+  if (prefix.length > full.length) return false;
+  for (let index = 0; index < prefix.length; index++) {
+    if (!sameEventRecord(prefix[index], full[index])) return false;
+  }
+  return true;
+}
+
+function sameEventRecord(a, b) {
+  return Number(a?.seq || 0) === Number(b?.seq || 0) && String(a?.type || "") === String(b?.type || "");
+}
+
+function leftRoundReviewTransition(previousSnapshot, nextSnapshot) {
+  return previousSnapshot
+    && nextSnapshot
+    && previousSnapshot.gameId === nextSnapshot.gameId
+    && previousSnapshot.phase === "RoundReview"
+    && nextSnapshot.phase !== "RoundReview";
+}
+
+async function enqueueNewEventAnimations(previousEvents, nextEvents, previousSnapshot, nextSnapshot) {
+  syncAnimationToggleButton();
+  if (!nextSnapshot) {
+    clearActiveAnimations(true);
+    animationGameId = "";
+    return;
+  }
+  if (nextSnapshot.gameId !== animationGameId) {
+    if (animationGameId) {
+      animationGameId = nextSnapshot.gameId;
+      resetPlayedAnimationEvents(nextSnapshot.gameId);
+      clearActiveAnimations(true);
+    } else {
+      animationGameId = nextSnapshot.gameId;
+    }
+  }
+  if (nextSnapshot.gameId !== playedAnimationGameId) resetPlayedAnimationEvents(nextSnapshot.gameId);
+  if (leftRoundReviewTransition(previousSnapshot, nextSnapshot)) clearActiveAnimations(true);
+  if (!previousSnapshot || previousSnapshot.gameId !== nextSnapshot.gameId) {
+    return;
+  }
+  const newEvents = nextEvents.slice(previousEvents.length);
+  const eventSnapshot = cloneAnimationSnapshot(previousSnapshot);
+  for (const event of newEvents) {
+    const key = animationEventKey(event);
+    if (playedAnimationEvents.has(key)) continue;
+    playedAnimationEvents.add(key);
+    const result = playEventAnimation(event, eventSnapshot, nextSnapshot);
+    if (result?.waitForPaint) await waitForNextPaint();
+  }
+}
+
+function resetPlayedAnimationEvents(nextGameId) {
+  playedAnimationGameId = nextGameId || "";
+  playedAnimationEvents.clear();
+}
+
+function animationEventKey(event) {
+  return `${Number(event?.seq || 0)}:${String(event?.type || "")}`;
+}
+
+function createInitialAnimationSnapshot(nextSnapshot) {
+  const baseGame = clonePlain(nextSnapshot?.game || {});
+  baseGame.ships = {};
+  baseGame.round = {
+    ...(baseGame.round || {}),
+    selectedGoods: [],
+    excludedGoods: undefined,
+  };
+  return {
+    ...nextSnapshot,
+    phase: "",
+    eventSeq: 0,
+    events: [],
+    game: baseGame,
+    ships: {},
+  };
+}
+
+function renderAnimationBaseFromGame(sourceGame) {
+  if (!sourceGame) return;
+  room = { ...(deferredRenderRoom || room || {}), status: "inProgress", game: sourceGame };
+  state = sourceGame;
+  gameId = sourceGame.gameId || room?.gameId || "";
+  actions = [];
+  actionEventSeq = sourceGame.eventSeq ?? null;
+  syncTransientControls();
+  renderRoom();
+}
+
+function waitForNextPaint() {
+  return new Promise((resolve) => {
+    if (typeof requestAnimationFrame !== "function") {
+      setTimeout(resolve, 0);
+      return;
+    }
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  });
+}
+
+function buildGoodsSelectedBaseGame(data, sourceGame, event) {
+  const base = clonePlain(sourceGame);
+  if (!base) return null;
+  const goodsIds = (data?.goodsIds || base.round?.selectedGoods || []).map(Number).filter(Boolean);
+  const ships = {};
+  goodsIds.forEach((shipId, index) => {
+    ships[String(shipId)] = {
+      shipId,
+      goodsId: shipId,
+      routeIndex: index + 1,
+      position: 0,
+      status: "sailing",
+      occupants: [],
+      stowaways: [],
+      lootedByPirates: false,
+      nextBoardingSlot: 0,
+    };
+  });
+  base.phase = "HarborMasterSetShips";
+  base.currentPlayer = base.harborMaster || base.currentPlayer || 0;
+  base.ships = ships;
+  base.round = {
+    ...(base.round || {}),
+    selectedGoods: goodsIds,
+    excludedGoods: data?.excludedGoodsId,
+    placementStep: 0,
+    movementStep: 0,
+    placementTurnsTaken: 0,
+    diceResults: [],
+    pendingPirateQueue: [],
+    pendingLootShips: [],
+    navigatorStep: "",
+    arrivedOrder: [],
+    dockedOrder: [],
+    confirmedPlayers: {},
+  };
+  base.board = emptyBoardForAnimation(base.board || {});
+  base.eventSeq = Number(event?.seq || base.eventSeq || 0);
+  base.events = Array.isArray(base.events)
+    ? base.events.filter((item) => Number(item?.seq || 0) <= base.eventSeq)
+    : [];
+  return base;
+}
+
+function emptyBoardForAnimation(board) {
+  const cleanSlots = (slots) => {
+    const out = {};
+    for (const [id, slot] of Object.entries(slots || {})) {
+      out[id] = { ...slot };
+      delete out[id].occupant;
+    }
+    return out;
+  };
+  return {
+    ...board,
+    ports: cleanSlots(board.ports),
+    docks: cleanSlots(board.docks),
+    pirates: [],
+    boardedPirates: [],
+    smallNavigator: null,
+    bigNavigator: null,
+    insurance: null,
+  };
+}
+
+function updateAnimationSnapshotFromGame(targetSnapshot, sourceGame) {
+  if (!targetSnapshot || !sourceGame) return;
+  const next = captureAnimationSnapshotFromRoom({ status: "inProgress", game: sourceGame });
+  if (!next) return;
+  Object.assign(targetSnapshot, next);
+}
+
+function clonePlain(value) {
+  if (value === null || value === undefined) return value;
+  return JSON.parse(JSON.stringify(value));
+}
+
+function cloneAnimationSnapshot(snapshot) {
+  if (!snapshot) return null;
+  const ships = {};
+  for (const [shipId, ship] of Object.entries(snapshot.ships || {})) {
+    ships[shipId] = {
+      ...ship,
+      point: ship.point ? { ...ship.point } : null,
+    };
+  }
+  return { ...snapshot, ships, game: snapshot.game || null };
+}
+
+function captureAnimationSnapshot() {
+  return captureAnimationSnapshotFromRoom(room);
+}
+
+function captureAnimationSnapshotFromRoom(sourceRoom) {
+  const sourceState = sourceRoom?.game || null;
+  if (!sourceRoom || !sourceState || sourceRoom.status !== "inProgress") return null;
+  const selected = selectedShipIdsForGame(sourceState);
+  const ships = {};
+  selected.forEach((shipId, index) => {
+    const ship = getShipFromGame(sourceState, shipId);
+    if (!ship) return;
+    const routeIndex = Number(ship.routeIndex || index + 1);
+    const boardPosition = shipBoardPositionForAnimation(ship.position, ship.status);
+    ships[shipId] = {
+      position: Number(ship.position || 0),
+      status: ship.status || "",
+      routeIndex,
+      point: shipPoint(boardPosition, routeIndex),
+    };
+  });
+  return {
+    gameId: sourceState.gameId || "",
+    phase: sourceState.phase || "",
+    roundNumber: Number(sourceState.roundNumber || 0),
+    eventSeq: Number(sourceState.eventSeq || 0),
+    events: Array.isArray(sourceState.events) ? sourceState.events : [],
+    game: sourceState,
+    ships,
+  };
+}
+
+function playEventAnimation(event, previousSnapshot, nextSnapshot) {
+  if (!event || !event.type) return;
+  if (event.type === "GoodsSelected") {
+    const baseGame = buildGoodsSelectedBaseGame(event.data || {}, nextSnapshot?.game || null, event);
+    if (!baseGame) return;
+    renderAnimationBaseFromGame(baseGame);
+    updateAnimationSnapshotFromGame(previousSnapshot, baseGame);
+    return { waitForPaint: true };
+  }
+  if (event.type === "ShipStartsSet") {
+    playShipStartsAnimation(event.data?.starts || {}, previousSnapshot, nextSnapshot);
+    return;
+  }
+  if (event.type === "AccomplicePlaced") {
+    queuePlacedPieceUpdate(event.data || {}, nextSnapshot?.game || null);
+    return;
+  }
+  if (event.type === "PirateBoarded") {
+    queuePirateBoardedPieceUpdate(event.data || {}, nextSnapshot?.game || null);
+    showPirateCue(event.data?.shipId);
+    return;
+  }
+  if (event.type === "DiceRolled") {
+    playDiceAnimation(event.data?.results || {}, previousSnapshot, nextSnapshot);
+    return;
+  }
+  if (event.type === "NavigatorMoved") {
+    playNavigatorAnimation(event.data?.moves || [], previousSnapshot, nextSnapshot);
+    return;
+  }
+  if (event.type === "PiratesLootedShip") {
+    showPirateCue(event.data?.shipId);
+    return;
+  }
+  if (event.type === "ShipArrived" || event.type === "ShipDocked") {
+    syncEventShipToFinalSnapshot(event.data?.shipId, previousSnapshot, nextSnapshot);
+  }
+}
+
+function playDiceAnimation(results, eventSnapshot, nextSnapshot) {
+  for (const [shipId, roll] of Object.entries(results || {})) {
+    animateShipDelta(shipId, Number(roll || 0), eventSnapshot, nextSnapshot, `+${roll}`);
+  }
+}
+
+function playNavigatorAnimation(moves, eventSnapshot, nextSnapshot) {
+  for (const move of moves || []) {
+    const delta = Number(move?.delta || 0);
+    if (!delta) continue;
+    animateShipDelta(move.shipId, delta, eventSnapshot, nextSnapshot, `${delta > 0 ? "+" : ""}${delta}`);
+  }
+}
+
+function playShipStartsAnimation(starts, eventSnapshot, nextSnapshot) {
+  const selected = selectedShipIdsForGame(eventSnapshot?.game || nextSnapshot?.game || null);
+  for (const shipId of selected) {
+    const start = Number(starts?.[shipId] ?? starts?.[String(shipId)] ?? 0);
+    const ship = eventSnapshot?.ships?.[shipId];
+    const currentPosition = Number(ship?.position || 0);
+    const delta = start - currentPosition;
+    animateShipDelta(shipId, delta, eventSnapshot, nextSnapshot, delta ? `${delta >= 0 ? "+" : ""}${delta}` : "");
+  }
+}
+
+function animateShipDelta(shipId, delta, eventSnapshot, nextSnapshot, label) {
+  const id = Number(shipId);
+  const ship = eventSnapshot?.ships?.[id] || nextSnapshot?.ships?.[id];
+  if (!ship?.point) return;
+  const startPoint = ship.point;
+  const nextPosition = Math.max(0, Number(ship.position || 0) + Number(delta || 0));
+  const endPoint = shipPoint(shipBoardPositionForAnimation(nextPosition, ship.status), ship.routeIndex);
+  const moved = pointDistance(startPoint, endPoint) > 0.1;
+  const updatedShip = {
+    ...ship,
+    position: nextPosition,
+    point: endPoint,
+  };
+  if (moved || label) enqueueShipAnimation(id, startPoint, endPoint, label, moved, updatedShip);
+  if (eventSnapshot?.ships) {
+    eventSnapshot.ships[id] = updatedShip;
+  }
+}
+
+function syncEventShipToFinalSnapshot(shipId, eventSnapshot, nextSnapshot) {
+  const id = Number(shipId);
+  const finalShip = nextSnapshot?.ships?.[id];
+  if (!finalShip || !eventSnapshot?.ships) return;
+  eventSnapshot.ships[id] = {
+    ...finalShip,
+    point: finalShip.point ? { ...finalShip.point } : null,
+  };
+  enqueueShipInfoUpdate(id, eventSnapshot.ships[id]);
+}
+
+function pointDistance(a, b) {
+  if (!a || !b) return 0;
+  return Math.abs(Number(a.x) - Number(b.x)) + Math.abs(Number(a.y) - Number(b.y));
+}
+
+function queuePlacedPieceUpdate(data, sourceGame) {
+  const positionType = data.positionType || "";
+  const key = placementVisualQueueKey(data);
+  queueAnimation(key, (done) => {
+    syncPlacementCell(data, sourceGame);
+    const target = placedPieceElement(data);
+    if (!animationsEnabled || !target) {
+      done();
+      return null;
+    }
+    return startElementPulse(target, "anim-piece-pulse", done);
+  });
+}
+
+function placementVisualQueueKey(data) {
+  const positionType = data.positionType || "";
+  if (positionType === "ship") {
+    if (data.stowaway) return `cell:stowaway:${data.shipId}:${data.stowawaySlot ?? data.playerId ?? ""}`;
+    return `cell:ship:${data.shipId}:${shipSeatIndexFromEventData(data)}`;
+  }
+  if (positionType === "port" || positionType === "dock") return `cell:${positionType}:${data.slot}`;
+  if (positionType === "pirate") return `cell:pirate:${slotIdFromEventData(data, specialPieceSlotIndex("pirate", data.playerId))}`;
+  if (positionType === "navigatorSmall") return "cell:navigatorSmall:small";
+  if (positionType === "navigatorBig") return "cell:navigatorBig:big";
+  if (positionType === "insurance") return "cell:insurance:insurance";
+  return `cell:${positionType || "unknown"}:${data.playerId || ""}`;
+}
+
+function syncPlacementCell(data, sourceGame) {
+  const positionType = data.positionType || "";
+  if (positionType === "ship") {
+    if (!data.stowaway) syncShipSeatCell(data.shipId, data.playerId, sourceGame, shipSeatIndexFromEventData(data));
+    return;
+  }
+  if (positionType === "port") {
+    syncBoardSlotCell("port", data.slot, sourceGame);
+    return;
+  }
+  if (positionType === "dock") {
+    syncBoardSlotCell("dock", data.slot, sourceGame);
+    return;
+  }
+  if (positionType === "pirate") {
+    syncSpecialSlotCell("pirate", slotIdFromEventData(data, specialPieceSlotIndex("pirate", data.playerId)), sourceGame);
+    return;
+  }
+  if (positionType === "navigatorSmall") {
+    syncSpecialSlotCell("navigatorSmall", "small", sourceGame);
+    return;
+  }
+  if (positionType === "navigatorBig") {
+    syncSpecialSlotCell("navigatorBig", "big", sourceGame);
+    return;
+  }
+  if (positionType === "insurance") {
+    syncSpecialSlotCell("insurance", "insurance", sourceGame);
+  }
+}
+
+function placedPieceElement(data) {
+  const positionType = data.positionType || "";
+  if (positionType === "ship") {
+    if (data.stowaway) return null;
+    return shipPieceElement(data.shipId, data.playerId, shipSeatIndexFromEventData(data));
+  }
+  if (positionType === "port" || positionType === "dock") {
+    return pieceInSlotElement(positionType, data.slot, data.playerId);
+  }
+  if (positionType === "pirate") {
+    return pieceInSlotElement("pirate", slotIdFromEventData(data, specialPieceSlotIndex("pirate", data.playerId)), data.playerId);
+  }
+  if (positionType === "navigatorSmall" || positionType === "navigatorBig" || positionType === "insurance") {
+    return pieceInSlotElement(positionType, slotIdFromEventData(data, positionType === "insurance" ? "insurance" : (positionType === "navigatorSmall" ? "small" : "big")), data.playerId);
+  }
+  return null;
+}
+
+function shipPieceElement(shipId, playerId, seatIndex = null) {
+  const id = selectorValue(shipId);
+  if (seatIndex !== null && seatIndex !== undefined && Number(seatIndex) >= 0) {
+    return document.querySelector(`.top-ship-seat[data-ship-id="${id}"][data-seat-index="${Number(seatIndex)}"][data-player-id="${selectorValue(playerId)}"]`);
+  }
+  const pid = selectorValue(playerId);
+  const pieces = document.querySelectorAll(`.top-ship-seat[data-ship-id="${id}"][data-player-id="${pid}"]`);
+  return pieces[pieces.length - 1] || null;
+}
+
+function pieceInSlotElement(kind, slotId, playerId) {
+  return document.querySelector(`.board-slot[data-kind="${selectorValue(kind)}"][data-slot-id="${selectorValue(slotId)}"] .piece[data-player-id="${selectorValue(playerId)}"]`);
+}
+
+function slotIdFromEventData(data, fallback = "") {
+  if (data?.slot !== undefined && data?.slot !== null && data.slot !== "") return data.slot;
+  return fallback;
+}
+
+function shipSeatIndexFromEventData(data) {
+  if (data?.slot !== undefined && data?.slot !== null && !Number.isNaN(Number(data.slot))) return Number(data.slot);
+  if (data?.boardingSlot !== undefined && data?.boardingSlot !== null && !Number.isNaN(Number(data.boardingSlot))) {
+    return Math.max(0, Number(data.boardingSlot) - 1);
+  }
+  return shipSeatIndexForPlayer(data?.shipId, data?.playerId);
+}
+
+function shipSeatIndexForPlayer(shipId, playerId) {
+  const ship = getShipFromGame(deferredRenderRoom?.game || null, Number(shipId))
+    || getShipFromGame(state, Number(shipId));
+  const occupants = ship?.occupants || [];
+  for (let index = occupants.length - 1; index >= 0; index--) {
+    if (Number(occupants[index]?.playerId) === Number(playerId)) return index;
+  }
+  return Math.max(0, occupants.length - 1);
+}
+
+function specialPieceSlotIndex(kind, playerId) {
+  if (kind !== "pirate") return "";
+  const pieces = deferredRenderRoom?.game?.board?.pirates || state?.board?.pirates || [];
+  for (let index = pieces.length - 1; index >= 0; index--) {
+    if (Number(pieces[index]?.playerId) === Number(playerId)) return index + 1;
+  }
+  return Math.max(1, pieces.length);
+}
+
+function syncShipSeatCell(shipId, playerId, sourceGame, seatIndex = null) {
+  const ship = getShipFromGame(sourceGame, Number(shipId));
+  if (!ship) return;
+  const resolvedSeatIndex = seatIndex === null || seatIndex === undefined
+    ? shipSeatIndexForPlayerFromShip(ship, playerId)
+    : Number(seatIndex);
+  const target = document.querySelector(`.top-ship-seat[data-ship-id="${selectorValue(shipId)}"][data-seat-index="${resolvedSeatIndex}"]`);
+  const occupant = (ship.occupants || [])[resolvedSeatIndex];
+  const cost = boardingCosts(Number(shipId))[resolvedSeatIndex] ?? "";
+  updateTopShipSeatElement(target, Number(shipId), resolvedSeatIndex, occupant, cost);
+}
+
+function shipSeatIndexForPlayerFromShip(ship, playerId) {
+  const occupants = ship?.occupants || [];
+  for (let index = occupants.length - 1; index >= 0; index--) {
+    if (Number(occupants[index]?.playerId) === Number(playerId)) return index;
+  }
+  return Math.max(0, occupants.length - 1);
+}
+
+function updateTopShipSeatElement(target, shipId, seatIndex, occupant, cost) {
+  if (!target) return;
+  target.classList.toggle("occupied", Boolean(occupant));
+  target.dataset.shipId = String(shipId);
+  target.dataset.seatIndex = String(seatIndex);
+  if (occupant) {
+    target.dataset.playerId = String(Number(occupant.playerId));
+    target.dataset.pieceRole = occupant.role || "";
+    target.setAttribute("style", pieceStyle(occupant));
+    target.textContent = `P${occupant.playerId}`;
+  } else {
+    delete target.dataset.playerId;
+    delete target.dataset.pieceRole;
+    target.removeAttribute("style");
+    target.textContent = cost;
+  }
+}
+
+function syncBoardSlotCell(kind, slotId, sourceGame) {
+  const slot = kind === "port"
+    ? sourceGame?.board?.ports?.[slotId]
+    : sourceGame?.board?.docks?.[slotId];
+  const target = document.querySelector(`.board-slot[data-kind="${selectorValue(kind)}"][data-slot-id="${selectorValue(slotId)}"]`);
+  updateBoardSlotPieceElement(target, slot?.occupant);
+}
+
+function syncSpecialSlotCell(kind, slotId, sourceGame) {
+  let piece = null;
+  if (kind === "pirate") piece = (sourceGame?.board?.pirates || [])[Math.max(0, Number(slotId) - 1)];
+  if (kind === "navigatorSmall") piece = sourceGame?.board?.smallNavigator;
+  if (kind === "navigatorBig") piece = sourceGame?.board?.bigNavigator;
+  if (kind === "insurance") piece = sourceGame?.board?.insurance;
+  const target = document.querySelector(`.board-slot[data-kind="${selectorValue(kind)}"][data-slot-id="${selectorValue(slotId)}"]`);
+  updateBoardSlotPieceElement(target, piece);
+}
+
+function updateBoardSlotPieceElement(target, piece) {
+  if (!target) return;
+  target.classList.toggle("filled", Boolean(piece));
+  const name = target.querySelector(".slot-name span:last-child");
+  if (name) name.textContent = piece ? pieceText(piece) : "空";
+  const row = target.querySelector(".piece-row");
+  if (row) row.innerHTML = piece ? pieceHTML(piece) : pieceHTML(null);
+  const labels = target.querySelector(".slot-labels");
+  if (labels) labels.hidden = Boolean(piece);
+}
+
+function enqueueShipAnimation(shipId, startPoint, endPoint, label, moved, shipInfo) {
+  queueAnimation(`ship:${shipId}`, (done, wasQueued) => {
+    const ship = shipElement(shipId);
+    if (!ship) {
+      done();
+      return null;
+    }
+    let frame = 0;
+    let badge = null;
+    let infoTimer = 0;
+    if (moved) {
+      const actualStart = readShipPoint(ship) || startPoint || endPoint;
+      if (!animationsEnabled) {
+        finishShipMove(ship, endPoint);
+        updateShipElementInfo(ship, shipInfo);
+        done();
+        return null;
+      }
+      ship.classList.remove("animating-move");
+      ship.style.transition = "none";
+      ship.style.left = `${actualStart.x}%`;
+      ship.style.top = `${actualStart.y}%`;
+      void ship.offsetWidth;
+      ship.style.transition = "";
+      ship.classList.add("animating-move");
+      frame = requestAnimationFrame(() => {
+        ship.style.left = `${endPoint.x}%`;
+        ship.style.top = `${endPoint.y}%`;
+      });
+      infoTimer = setTimeout(() => {
+        finishShipMove(ship, endPoint);
+        updateShipElementInfo(ship, shipInfo);
+      }, 680);
+    } else if (shipInfo) {
+      updateShipElementInfo(ship, shipInfo);
+    }
+    if (label) {
+      clearShipFloatBadges(ship);
+      if (animationsEnabled) {
+        badge = document.createElement("span");
+        badge.className = "ship-float";
+        badge.textContent = label;
+        ship.appendChild(badge);
+      }
+    }
+    if (!animationsEnabled) {
+      done();
+      return null;
+    }
+    const timer = setTimeout(() => {
+      if (moved) finishShipMove(ship, endPoint);
+      updateShipElementInfo(ship, shipInfo);
+      if (badge) badge.remove();
+      done();
+    }, BOARD_ANIMATION_DURATION_MS);
+    return {
+      finish: (snap) => {
+        cancelAnimationFrame(frame);
+        clearTimeout(infoTimer);
+        clearTimeout(timer);
+        if (snap && moved) finishShipMove(ship, endPoint);
+        if (snap) updateShipElementInfo(ship, shipInfo);
+        if (badge) badge.remove();
+      },
+    };
+  });
+}
+
+function clearShipFloatBadges(ship) {
+  ship?.querySelectorAll(".ship-float").forEach((item) => item.remove());
+}
+
+function enqueueShipInfoUpdate(shipId, shipInfo) {
+  if (!shipInfo) return;
+  queueAnimation(`ship:${shipId}`, (done) => {
+    updateShipElementInfo(shipElement(shipId), shipInfo);
+    done();
+    return null;
+  });
+}
+
+function updateShipElementInfo(ship, shipInfo) {
+  if (!ship || !shipInfo) return;
+  ship.dataset.shipPosition = String(Number(shipInfo.position || 0));
+  const lines = ship.querySelectorAll(".ship-line");
+  if (lines[0]) lines[0].textContent = `位置 ${shipTextPosition(Number(shipInfo.position || 0))}`;
+  if (lines[1]) lines[1].textContent = shipStatusName(shipInfo.status || "");
+}
+
+function finishShipMove(ship, endPoint) {
+  if (!ship) return;
+  ship.style.left = `${endPoint.x}%`;
+  ship.style.top = `${endPoint.y}%`;
+  ship.classList.remove("animating-move");
+  ship.style.transition = "";
+}
+
+function showPirateCue(shipId) {
+  const id = Number(shipId);
+  queueAnimation(`ship:${id}`, (done) => {
+    const ship = shipElement(id);
+    if (!ship) {
+      done();
+      return null;
+    }
+    if (!animationsEnabled) {
+      done();
+      return null;
+    }
+    ship.classList.remove("pirate-warning");
+    void ship.offsetWidth;
+    ship.classList.add("pirate-warning");
+    const icon = document.createElement("span");
+    icon.className = "pirate-cue";
+    icon.textContent = "☠";
+    ship.appendChild(icon);
+    const timer = setTimeout(() => {
+      ship.classList.remove("pirate-warning");
+      icon.remove();
+      done();
+    }, BOARD_ANIMATION_DURATION_MS);
+    return {
+      finish: () => {
+        clearTimeout(timer);
+        ship.classList.remove("pirate-warning");
+        icon.remove();
+      },
+    };
+  });
+}
+
+function queuePirateBoardedPieceUpdate(data, sourceGame) {
+  const shipId = data.shipId;
+  const playerId = data.playerId;
+  const seatIndex = shipSeatIndexFromEventData(data);
+  queueAnimation(`cell:ship:${shipId}:${seatIndex}`, (done) => {
+    syncShipSeatCell(shipId, playerId, sourceGame, seatIndex);
+    const piece = shipPieceElement(shipId, playerId, seatIndex);
+    if (!animationsEnabled) {
+      done();
+      return null;
+    }
+    if (!piece) {
+      done();
+      return null;
+    }
+    piece.classList.remove("anim-piece-pulse");
+    void piece.offsetWidth;
+    piece.classList.add("anim-piece-pulse");
+    const timer = setTimeout(() => {
+      piece.classList.remove("anim-piece-pulse");
+      done();
+    }, BOARD_ANIMATION_DURATION_MS);
+    return {
+      finish: () => {
+        clearTimeout(timer);
+        piece.classList.remove("anim-piece-pulse");
+      },
+    };
+  });
+}
+
+function startElementPulse(element, className, done) {
+  element.classList.remove(className);
+  void element.offsetWidth;
+  element.classList.add(className);
+  const timer = setTimeout(() => {
+    element.classList.remove(className);
+    done();
+  }, BOARD_ANIMATION_DURATION_MS);
+  return {
+    finish: () => {
+      clearTimeout(timer);
+      element.classList.remove(className);
+    },
+  };
+}
+
+function clearActiveAnimations(snapMoves) {
+  animationQueues.clear();
+  for (const key of [...activeAnimations.keys()]) {
+    cancelActiveAnimation(key, snapMoves);
+  }
+  if (!hasActiveOrQueuedAnimations()) scheduleDeferredRenderFlush();
+}
+
+function cancelActiveAnimation(key, snapMoves) {
+  const active = activeAnimations.get(key);
+  if (!active) return null;
+  activeAnimations.delete(key);
+  active.finish?.(snapMoves);
+  return active;
+}
+
+function queueAnimation(key, task) {
+  const queue = animationQueues.get(key) || [];
+  const wasQueued = activeAnimations.has(key) || queue.length > 0;
+  queue.push({ task, wasQueued });
+  animationQueues.set(key, queue);
+  if (!activeAnimations.has(key)) runNextAnimation(key);
+}
+
+function runNextAnimation(key) {
+  const queue = animationQueues.get(key);
+  const item = queue?.shift();
+  if (!item) {
+    animationQueues.delete(key);
+    if (!hasActiveOrQueuedAnimations()) scheduleDeferredRenderFlush();
+    return;
+  }
+  const active = { finish: null };
+  activeAnimations.set(key, active);
+  const done = () => {
+    if (activeAnimations.get(key) !== active) return;
+    activeAnimations.delete(key);
+    runNextAnimation(key);
+  };
+  const cleanup = item.task(done, item.wasQueued);
+  active.finish = cleanup?.finish || null;
+}
+
+function hasActiveOrQueuedAnimations() {
+  if (activeAnimations.size > 0) return true;
+  for (const queue of animationQueues.values()) {
+    if (queue.length > 0) return true;
+  }
+  return false;
+}
+
+function scheduleDeferredRenderFlush() {
+  if (!deferredRenderRoom || deferredRenderApplying) return;
+  setTimeout(() => {
+    flushDeferredRender().catch(showError);
+  }, 0);
+}
+
+async function flushDeferredRender() {
+  if (deferredRenderApplying || hasActiveOrQueuedAnimations() || !deferredRenderRoom) return;
+  const nextRoom = deferredRenderRoom;
+  deferredRenderRoom = null;
+  deferredRenderApplying = true;
+  try {
+    await applyRoomPayload(nextRoom, { animate: false });
+  } finally {
+    deferredRenderApplying = false;
+  }
+  if (deferredRenderRoom && !hasActiveOrQueuedAnimations()) scheduleDeferredRenderFlush();
+}
+
+function hasShipAnimation(shipId) {
+  const key = `ship:${shipId}`;
+  return activeAnimations.has(key) || Boolean(animationQueues.get(key)?.length);
+}
+
+function shipElement(shipId) {
+  return document.querySelector(`.sea-overlay .ship[data-ship-id="${selectorValue(shipId)}"]`);
+}
+
+function readShipPoint(ship) {
+  const x = Number(String(ship?.style?.left || "").replace("%", ""));
+  const y = Number(String(ship?.style?.top || "").replace("%", ""));
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return { x, y };
+}
+
+function selectorValue(value) {
+  return String(value ?? "").replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+}
+
+function selectedShipIdsForGame(game) {
+  const fromRound = (game?.round?.selectedGoods || []).map(Number);
+  if (fromRound.length) return fromRound;
+  return Object.values(game?.ships || {}).map((ship) => Number(ship.shipId)).sort((a, b) => a - b);
+}
+
+function getShipFromGame(game, id) {
+  return game?.ships?.[id] || game?.ships?.[String(id)];
+}
+
+function shipBoardPositionForAnimation(position, status) {
+  const numericPosition = Number(position || 0);
+  if (numericPosition > 13) return 14;
+  if (status === "arrived" && numericPosition <= 0) return 14;
+  return Math.max(0, Math.min(13, numericPosition));
+}
+
+function toggleAnimations() {
+  animationsEnabled = !animationsEnabled;
+  localStorage.setItem("manilaAnimationsEnabled", animationsEnabled ? "true" : "false");
+  syncAnimationToggleButton();
+  if (!animationsEnabled) clearActiveAnimations(true);
+}
+
+function syncAnimationToggleButton() {
+  const button = $("animationToggleBtn");
+  if (!button) return;
+  button.textContent = animationsEnabled ? "动画 开" : "动画 关";
+  button.setAttribute("aria-pressed", animationsEnabled ? "true" : "false");
 }
 
 function connectRoomSocket() {
@@ -317,7 +1282,7 @@ function connectRoomSocket() {
   roomSocket = new WebSocket(url);
   roomSocket.onmessage = (event) => {
     const data = JSON.parse(event.data || "{}");
-    applyRoomPayload(data.room).catch(showError);
+    enqueueWSPayload(data.room);
   };
   roomSocket.onclose = () => {
     reconnectTimer = setTimeout(connectRoomSocket, 1200);
@@ -331,12 +1296,27 @@ function renderRoom() {
   if (lobby) lobby.hidden = Boolean(inGame);
   if (app) app.hidden = !inGame;
   if (inGame) {
+    syncActionLockUI();
     render();
     setBusyButtons(false);
   } else {
+    syncActionLockUI();
     renderEmpty();
     renderLobby();
   }
+}
+
+function renderPostActionControls() {
+  if (!room || !state || room.status !== "inProgress") {
+    renderRoom();
+    return;
+  }
+  syncTransientControls();
+  renderContextControls();
+  renderActionList();
+  setBusyButtons(false);
+  syncActionLockUI();
+  syncAnimationToggleButton();
 }
 
 function renderLobby(resetView = false) {
@@ -399,18 +1379,81 @@ function roomStatusText() {
 async function loadLegalActions() {
   actions = [];
   actionEventSeq = state?.eventSeq ?? null;
-  if (!state || state.status === "ended") return actionEventSeq;
+  if (!state || state.status === "ended") {
+    if (actionInputLocked) unlockLocalActions();
+    return actionEventSeq;
+  }
   const data = await api("/room/actions");
-  actions = data.actions || [];
+  const loadedActions = data.actions || [];
   actionEventSeq = data.eventSeq ?? actionEventSeq;
+  if (actionInputLocked && !canUnlockLocalActions(loadedActions, actionEventSeq)) {
+    actions = [];
+    return actionEventSeq;
+  }
+  actions = loadedActions;
+  if (actionInputLocked) unlockLocalActions();
   return actionEventSeq;
 }
 
+function canUnlockLocalActions(loadedActions, loadedEventSeq) {
+  if (!Array.isArray(loadedActions) || loadedActions.length === 0) return false;
+  if (!isLocalActionWindow()) return false;
+  if (!pendingSubmittedAction) return true;
+  return Number(loadedEventSeq || 0) > Number(pendingSubmittedAction.expectedEventSeq || 0);
+}
+
+function isLocalActionWindow() {
+  if (!state) return false;
+  if (state.phase === "RoundReview") return true;
+  const localPlayerId = getLocalPlayerId();
+  return localPlayerId > 0 && expectedActorIdForPhase() === localPlayerId;
+}
+
+function expectedActorIdForPhase() {
+  if (!state) return 0;
+  if (state.phase === "HarborMasterBuyShare" || state.phase === "HarborMasterSelectGoods" || state.phase === "HarborMasterSetShips") {
+    return Number(state.harborMaster || state.currentPlayer || 0);
+  }
+  return Number(state.currentPlayer || 0);
+}
+
+function lockLocalActions(actionRequest) {
+  actionInputLocked = true;
+  pendingSubmittedAction = actionRequest || null;
+  actions = [];
+  actionEventSeq = null;
+  hideBoardActionTargets();
+  renderContextControls();
+  renderActionList();
+  setBusyButtons(false);
+  syncActionLockUI();
+}
+
+function unlockLocalActions() {
+  actionInputLocked = false;
+  pendingSubmittedAction = null;
+  syncActionLockUI();
+}
+
+function syncActionLockUI() {
+  document.querySelector(".app-shell")?.classList.toggle("actions-locked", actionInputLocked);
+}
+
+function hideBoardActionTargets() {
+  document.querySelectorAll(".board-stage [data-action-key], .top-dashboard [data-action-key]").forEach((el) => {
+    el.classList.remove("actionable");
+    el.removeAttribute("data-action-key");
+    if (el.matches("button")) el.disabled = true;
+  });
+}
+
 async function submitAction(action, payloadOverride) {
+  if (actionInputLocked) return;
   if (!state || !action) return;
   const localPlayerId = getLocalPlayerId();
-  if (state.phase !== "RoundReview" && Number(state.currentPlayer) !== localPlayerId) {
-    showToast(`等待 P${state.currentPlayer} 行动。`);
+  const expectedActorId = expectedActorIdForPhase();
+  if (state.phase !== "RoundReview" && expectedActorId !== localPlayerId) {
+    showToast(`等待 P${expectedActorId || state.currentPlayer} 行动。`);
     return;
   }
   const payload = payloadOverride === undefined ? normalizePayload(action.payload || {}) : payloadOverride;
@@ -420,18 +1463,28 @@ async function submitAction(action, payloadOverride) {
     payload,
     expectedEventSeq: actionEventSeq ?? state.eventSeq,
   };
-  await api("/room/actions", { method: "POST", body: JSON.stringify(requestBody) });
-  resetTransientControls();
-  await refresh();
+  lockLocalActions(requestBody);
+  try {
+    await api("/room/actions", { method: "POST", body: JSON.stringify(requestBody) });
+    resetTransientControls();
+  } catch (err) {
+    unlockLocalActions();
+    await loadLegalActions().then(renderPostActionControls).catch(() => {});
+    throw err;
+  }
 }
 
 async function aiStep() {
-  if (!room?.canAIForCurrent || aiBusy) return;
+  if (!room?.canAIForCurrent || aiBusy || actionInputLocked) return;
   aiBusy = true;
+  lockLocalActions({ type: "AI_STEP", expectedEventSeq: state?.eventSeq ?? actionEventSeq ?? 0 });
   setBusyButtons(true);
   try {
     await api("/room/ai-step", { method: "POST" });
-    await refresh();
+  } catch (err) {
+    unlockLocalActions();
+    await loadLegalActions().then(renderPostActionControls).catch(() => {});
+    throw err;
   } finally {
     aiBusy = false;
     setBusyButtons(false);
@@ -439,12 +1492,16 @@ async function aiStep() {
 }
 
 async function aiAdvanceRound() {
-  if (!room?.canAIForCurrent || aiBusy) return;
+  if (!room?.canAIForCurrent || aiBusy || actionInputLocked) return;
   aiBusy = true;
+  lockLocalActions({ type: "AI_ROUND", expectedEventSeq: state?.eventSeq ?? actionEventSeq ?? 0 });
   setBusyButtons(true);
   try {
     await api("/room/ai-round", { method: "POST" });
-    await refresh();
+  } catch (err) {
+    unlockLocalActions();
+    await loadLegalActions().then(renderPostActionControls).catch(() => {});
+    throw err;
   } finally {
     aiBusy = false;
     setBusyButtons(false);
@@ -466,6 +1523,7 @@ function render() {
   renderGoodsMarket();
   renderPorts();
   renderDocks();
+  renderDestinationZones();
   renderSea();
   renderTopShips();
   renderSpecialSlots();
@@ -484,6 +1542,7 @@ function renderEmpty() {
   $("goodsMarket").innerHTML = "";
   $("portSlots").innerHTML = "";
   $("dockSlots").innerHTML = "";
+  $("destinationZones").innerHTML = "";
   $("seaLanes").innerHTML = `<div class="empty-note">欢迎来到马尼拉！</div>`;
   $("pirateSlots").innerHTML = "";
   $("navigatorSlots").innerHTML = "";
@@ -502,7 +1561,7 @@ function renderSettlementOverlay() {
   const settlement = settlementForDisplay();
   const scores = settlement?.scores || [];
   const key = currentSettlementKey();
-  if (!scores.length || key === dismissedSettlementKey) {
+  if (!scores.length || dismissedSettlementKeys.has(key)) {
     overlay.hidden = true;
     overlay.innerHTML = "";
     return;
@@ -539,8 +1598,25 @@ function currentSettlementKey() {
 }
 
 function closeSettlementOverlay(key) {
-  dismissedSettlementKey = key;
+  rememberDismissedSettlement(key);
   renderRoom();
+}
+
+function loadDismissedSettlementKeys() {
+  try {
+    const items = JSON.parse(localStorage.getItem(DISMISSED_SETTLEMENTS_KEY) || "[]");
+    return new Set(Array.isArray(items) ? items.filter(Boolean) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function rememberDismissedSettlement(key) {
+  if (!key) return;
+  dismissedSettlementKeys.add(key);
+  const items = [...dismissedSettlementKeys].slice(-40);
+  dismissedSettlementKeys = new Set(items);
+  localStorage.setItem(DISMISSED_SETTLEMENTS_KEY, JSON.stringify(items));
 }
 
 function settlementForDisplay() {
@@ -636,7 +1712,7 @@ function renderPorts() {
   $("portSlots").innerHTML = ["A", "B", "C"].map((slotId) => {
     const slot = state.board?.ports?.[slotId];
     const ship = shipBySlot("port", slotId);
-    const action = placementAction("port", slotId) || destinationAction("port");
+    const action = placementAction("port", slotId);
     return boardSlotHTML({
       id: slotId,
       title: `港口 ${slotId}`,
@@ -655,7 +1731,7 @@ function renderDocks() {
   $("dockSlots").innerHTML = ["A", "B", "C"].map((slotId) => {
     const slot = state.board?.docks?.[slotId];
     const ship = shipBySlot("dock", slotId);
-    const action = placementAction("dock", slotId) || destinationAction("dock");
+    const action = placementAction("dock", slotId);
     return boardSlotHTML({
       id: slotId,
       title: `船坞 ${slotId}`,
@@ -668,6 +1744,26 @@ function renderDocks() {
     });
   }).join("");
   wireBoardSlots("dockSlots");
+}
+
+function renderDestinationZones() {
+  const dockAction = destinationAction("dock");
+  const portAction = destinationAction("port");
+  if (!dockAction && !portAction) {
+    $("destinationZones").innerHTML = "";
+    return;
+  }
+  $("destinationZones").innerHTML = [
+    destinationZoneHTML("dock", "船坞", dockAction),
+    destinationZoneHTML("port", "港口", portAction),
+  ].join("");
+  wireBoardSlots("destinationZones");
+}
+
+function destinationZoneHTML(kind, label, action) {
+  const actionKey = action ? actionKeyFor(action) : "";
+  const classes = ["destination-zone", kind, action ? "actionable" : ""].filter(Boolean).join(" ");
+  return `<button class="${classes}" data-action-key="${escapeAttr(actionKey)}" type="button" aria-label="选择${label}"></button>`;
 }
 
 function boardSlotHTML({ id, title, meta, labels, piece, action, ship, kind }) {
@@ -692,6 +1788,7 @@ function wireBoardSlots(containerId) {
 }
 
 function renderSea() {
+  if (hasActiveOrQueuedAnimations()) return;
   const selected = selectedShipIds();
   if (selected.length === 0) {
     $("seaLanes").innerHTML = `<div class="empty-note">欢迎来到马尼拉！</div>`;
@@ -730,7 +1827,8 @@ function renderTopShip(ship) {
   const slots = boardingCosts(shipId).map((cost, index) => {
     const occupant = occupants[index];
     const style = occupant ? pieceStyle(occupant) : "";
-    return `<span class="top-ship-seat ${occupant ? "occupied" : ""}" style="${style}">${occupant ? `P${occupant.playerId}` : cost}</span>`;
+    const pieceAttrs = occupant ? `data-player-id="${Number(occupant.playerId)}" data-piece-role="${escapeAttr(occupant.role || "")}"` : "";
+    return `<span class="top-ship-seat ${occupant ? "occupied" : ""}" data-ship-id="${shipId}" data-seat-index="${index}" ${pieceAttrs} style="${style}">${occupant ? `P${occupant.playerId}` : cost}</span>`;
   }).join("");
   const arrived = ship.status === "arrived";
   return `<article class="top-ship ${meta.className} ${arrived ? "arrived" : ""}">
@@ -749,14 +1847,13 @@ function renderShip(ship, fallbackIndex) {
   const pirate = actions.find((a) => a.type === "PirateBoard" && Number(a.payload?.shipId) === shipId);
   const action = placement || pirate;
   const routeIndex = Number(ship.routeIndex || fallbackIndex + 1);
-  const previewStart = state.phase === "HarborMasterSetShips" ? Number(shipStarts[shipId]) : NaN;
-  const basePosition = Number.isFinite(previewStart) ? clampIntegerValue(previewStart, 0, 5) : Number(ship.position || 0);
+  const basePosition = Number(ship.position || 0);
   const displayPosition = shipTextPosition(basePosition);
   const point = shipPoint(shipBoardPosition(basePosition, ship.status), routeIndex);
   const actionKey = action ? actionKeyFor(action) : "";
   const classes = ["ship", meta.className, action ? "actionable" : ""].filter(Boolean).join(" ");
   const icon = goodsIconSrc(shipId);
-  return `<div class="${classes}" data-action-key="${escapeAttr(actionKey)}" style="left: ${point.x}%; top: ${point.y}%;">
+  return `<div class="${classes}" data-action-key="${escapeAttr(actionKey)}" data-ship-id="${shipId}" data-ship-position="${escapeAttr(basePosition)}" data-route-index="${routeIndex}" style="left: ${point.x}%; top: ${point.y}%;">
     <div class="ship-text">
       <div class="ship-title">${meta.name}</div>
       <div class="ship-line">位置 ${displayPosition}</div>
@@ -790,30 +1887,30 @@ function shipTextPosition(position) {
 function renderSpecialSlots() {
   const piratePieces = pirateSlots();
   $("pirateSlots").innerHTML = [
-    specialSlotHTML("船长", "花费 5", piratePieces[0], placementAction("pirate", 1), slotLabels(5, null)),
-    specialSlotHTML("副手", "花费 5", piratePieces[1], placementAction("pirate", 2), slotLabels(5, null)),
+    specialSlotHTML("船长", "花费 5", piratePieces[0], placementAction("pirate", 1), slotLabels(5, null), "pirate", "1"),
+    specialSlotHTML("副手", "花费 5", piratePieces[1], placementAction("pirate", 2), slotLabels(5, null), "pirate", "2"),
   ].join("");
 
   $("navigatorSlots").innerHTML = [
-    specialSlotHTML("小领航", "花费 2", state.board?.smallNavigator, placementAction("navigatorSmall", "small"), slotLabels(2, null)),
-    specialSlotHTML("大领航", "花费 5", state.board?.bigNavigator, placementAction("navigatorBig", "big"), slotLabels(5, null)),
+    specialSlotHTML("小领航", "花费 2", state.board?.smallNavigator, placementAction("navigatorSmall", "small"), slotLabels(2, null), "navigatorSmall", "small"),
+    specialSlotHTML("大领航", "花费 5", state.board?.bigNavigator, placementAction("navigatorBig", "big"), slotLabels(5, null), "navigatorBig", "big"),
   ].join("");
 
   $("insuranceSlot").innerHTML = specialSlotHTML("保险商", "立即获得 10", state.board?.insurance, placementAction("insurance", "insurance"), [
-    { type: "cost", text: "赔船坞" },
     { type: "reward", text: "收益 10" },
-  ]);
+    { type: "cost", text: "赔船坞" },
+  ], "insurance", "insurance");
 
   for (const id of ["pirateSlots", "navigatorSlots", "insuranceSlot"]) {
     wireBoardSlots(id);
   }
 }
 
-function specialSlotHTML(title, meta, piece, action, labels) {
+function specialSlotHTML(title, meta, piece, action, labels, kind = "", slotId = "") {
   const actionKey = action ? actionKeyFor(action) : "";
   const classes = ["board-slot", piece ? "filled" : "", action ? "actionable" : ""].filter(Boolean).join(" ");
   const debugClass = DEBUG_SHOW_ALL_HOTSPOTS ? " debug-hotspot" : "";
-  return `<div class="${classes}${debugClass}" data-action-key="${escapeAttr(actionKey)}">
+  return `<div class="${classes}${debugClass}" data-action-key="${escapeAttr(actionKey)}" data-kind="${escapeAttr(kind)}" data-slot-id="${escapeAttr(slotId)}">
     <div class="slot-name"><span>${title}</span><span>${piece ? pieceText(piece) : "空"}</span></div>
     <div class="slot-meta">${meta}</div>
     <div class="piece-row">${piece ? pieceHTML(piece) : pieceHTML(null)}</div>
@@ -928,13 +2025,11 @@ function renderContextControls() {
       input.oninput = () => {
         shipStarts[input.dataset.shipId] = Number(input.value);
         updateStartsSum();
-        renderSea();
       };
       input.onchange = () => {
         const value = clampNumberInput(input, 0, 5);
         shipStarts[input.dataset.shipId] = value;
         updateStartsSum();
-        renderSea();
       };
     });
     $("startsSubmitBtn").onclick = () => submitShipStarts().catch(showError);
@@ -1235,6 +2330,7 @@ function defaultStarts(ids) {
 }
 
 function placementAction(positionType, targetId) {
+  if (actionInputLocked) return undefined;
   return actions.find((a) => {
     if (a.type !== "PlaceAccomplice") return false;
     const payload = a.payload || {};
@@ -1243,6 +2339,7 @@ function placementAction(positionType, targetId) {
 }
 
 function destinationAction(destination) {
+  if (actionInputLocked) return undefined;
   return actions.find((a) => {
     return a.type === "PirateChooseDestination"
       && String(a.payload?.destination) === destination;
@@ -1250,6 +2347,7 @@ function destinationAction(destination) {
 }
 
 function actionByKey(key) {
+  if (actionInputLocked) return undefined;
   return actions.find((a) => actionKeyFor(a) === key);
 }
 
@@ -1611,7 +2709,7 @@ function pieceHTML(piece) {
   if (!piece) return `<span class="piece empty">空</span>`;
   const boarded = piece.role === "boardedCaptain" || piece.role === "boardedMate";
   const label = boarded ? `P${piece.playerId}/已登船` : `P${piece.playerId}`;
-  return `<span class="piece ${boarded ? "boarded" : ""}" style="${pieceStyle(piece)}">${label}</span>`;
+  return `<span class="piece ${boarded ? "boarded" : ""}" data-player-id="${Number(piece.playerId)}" data-piece-role="${escapeAttr(piece.role || "")}" style="${pieceStyle(piece)}">${label}</span>`;
 }
 
 function pieceStyle(piece) {
@@ -1640,7 +2738,7 @@ function shipStatusName(status) {
 }
 
 function setBusyButtons(isBusy) {
-  const disabled = isBusy || !room?.canAIForCurrent;
+  const disabled = isBusy || actionInputLocked || !room?.canAIForCurrent;
   $("aiStepBtn").disabled = disabled;
   $("aiRoundBtn").disabled = disabled;
   $("newGameBtn").disabled = Boolean(room?.participant?.joined);
@@ -1685,6 +2783,7 @@ function escapeAttr(value) {
 $("newGameBtn").onclick = () => joinRoom().catch(showError);
 $("aiStepBtn").onclick = () => aiStep().catch(showError);
 $("aiRoundBtn").onclick = () => aiAdvanceRound().catch(showError);
+$("animationToggleBtn").onclick = toggleAnimations;
 $("lobbyJoinBtn").onclick = () => joinRoom().catch(showError);
 $("lobbyRenameBtn").onclick = () => renameRoomParticipant().catch(showError);
 $("helpCloseBtn").onclick = closeHelp;
@@ -1702,5 +2801,6 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") closeHelp();
 });
 
+syncAnimationToggleButton();
 connectRoomSocket();
 refresh().catch(() => renderRoom());

@@ -88,7 +88,7 @@ func (e *Engine) LegalActions(g *model.Game, playerID int) ([]model.LegalAction,
 	if _, ok := g.Players[playerID]; !ok {
 		return nil, fmt.Errorf("unknown player %d", playerID)
 	}
-	if g.Phase != model.PhaseRoundReview && g.CurrentPlayer != playerID {
+	if g.Phase != model.PhaseRoundReview && e.actorForPhase(g) != playerID {
 		return []model.LegalAction{}, nil
 	}
 	switch g.Phase {
@@ -115,11 +115,20 @@ func (e *Engine) LegalActions(g *model.Game, playerID int) ([]model.LegalAction,
 	}
 }
 
+func (e *Engine) actorForPhase(g *model.Game) int {
+	switch g.Phase {
+	case model.PhaseHarborMasterBuyShare, model.PhaseHarborMasterSelectGoods, model.PhaseHarborMasterSetShips:
+		return g.HarborMaster
+	default:
+		return g.CurrentPlayer
+	}
+}
+
 func (e *Engine) ApplyAction(g *model.Game, a model.Action) error {
 	if a.ExpectedEventSeq != nil && *a.ExpectedEventSeq != g.EventSeq {
 		return fmt.Errorf("event sequence mismatch: expected %d got %d", *a.ExpectedEventSeq, g.EventSeq)
 	}
-	if g.Phase != model.PhaseRoundReview && g.CurrentPlayer != a.PlayerID {
+	if g.Phase != model.PhaseRoundReview && e.actorForPhase(g) != a.PlayerID {
 		return fmt.Errorf("not player %d turn", a.PlayerID)
 	}
 	if g.Status == model.StatusEnded {
@@ -574,13 +583,20 @@ func (e *Engine) applyPlacement(g *model.Game, a model.Action) error {
 		if v, ok := chosen.Payload["occupiesSlot"].(bool); ok {
 			occupies = v
 		}
+		slot := len(g.Ships[gid].Occupants)
+		stowawaySlot := len(g.Ships[gid].Stowaways)
 		if occupies {
 			g.Ships[gid].Occupants = append(g.Ships[gid].Occupants, piece)
 			g.Ships[gid].NextBoardingIndex++
 		} else {
 			g.Ships[gid].Stowaways = append(g.Ships[gid].Stowaways, piece)
 		}
-		e.addEvent(g, "AccomplicePlaced", "", map[string]interface{}{"playerId": a.PlayerID, "positionType": pos, "shipId": gid, "cost": cost, "stowaway": !occupies})
+		data := map[string]interface{}{"playerId": a.PlayerID, "positionType": pos, "shipId": gid, "stowawaySlot": stowawaySlot, "cost": cost, "stowaway": !occupies}
+		if occupies {
+			data["slot"] = slot
+			data["boardingSlot"] = slot + 1
+		}
+		e.addEvent(g, "AccomplicePlaced", "", data)
 	case "port":
 		id := fmt.Sprint(target)
 		g.Board.Ports[id].Occupant = &piece
@@ -599,17 +615,17 @@ func (e *Engine) applyPlacement(g *model.Game, a model.Action) error {
 			return fmt.Errorf("invalid pirate slot")
 		}
 		g.Board.Pirates = append(g.Board.Pirates, piece)
-		e.addEvent(g, "AccomplicePlaced", "", map[string]interface{}{"playerId": a.PlayerID, "positionType": pos, "cost": cost})
+		e.addEvent(g, "AccomplicePlaced", "", map[string]interface{}{"playerId": a.PlayerID, "positionType": pos, "slot": targetID, "cost": cost})
 	case "navigatorSmall":
 		g.Board.SmallNavigator = &piece
-		e.addEvent(g, "AccomplicePlaced", "", map[string]interface{}{"playerId": a.PlayerID, "positionType": pos, "cost": cost})
+		e.addEvent(g, "AccomplicePlaced", "", map[string]interface{}{"playerId": a.PlayerID, "positionType": pos, "slot": "small", "cost": cost})
 	case "navigatorBig":
 		g.Board.BigNavigator = &piece
-		e.addEvent(g, "AccomplicePlaced", "", map[string]interface{}{"playerId": a.PlayerID, "positionType": pos, "cost": cost})
+		e.addEvent(g, "AccomplicePlaced", "", map[string]interface{}{"playerId": a.PlayerID, "positionType": pos, "slot": "big", "cost": cost})
 	case "insurance":
 		g.Board.Insurance = &piece
 		g.Players[a.PlayerID].Cash += 10
-		e.addEvent(g, "AccomplicePlaced", "", map[string]interface{}{"playerId": a.PlayerID, "positionType": pos, "reward": 10})
+		e.addEvent(g, "AccomplicePlaced", "", map[string]interface{}{"playerId": a.PlayerID, "positionType": pos, "slot": "insurance", "reward": 10})
 	default:
 		return fmt.Errorf("unknown position type %s", pos)
 	}
@@ -745,9 +761,10 @@ func (e *Engine) applyPirateBoard(g *model.Game, a model.Action) error {
 		}
 		g.Board.BoardedPirates = append(g.Board.BoardedPirates, boardedMarker)
 		pirate.Role = "boardedPirate"
+		slot := len(g.Ships[gid].Occupants)
 		g.Ships[gid].Occupants = append(g.Ships[gid].Occupants, pirate)
 		g.Ships[gid].NextBoardingIndex++
-		e.addEvent(g, "PirateBoarded", "", map[string]interface{}{"playerId": a.PlayerID, "shipId": gid})
+		e.addEvent(g, "PirateBoarded", "", map[string]interface{}{"playerId": a.PlayerID, "shipId": gid, "slot": slot, "boardingSlot": slot + 1})
 	} else if a.Type == model.ActionPirateSkipBoard {
 		e.addEvent(g, "PirateBoardSkipped", "", map[string]interface{}{"playerId": a.PlayerID})
 	} else {

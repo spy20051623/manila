@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>马尼拉棋盘桌</title>
-  <link rel="stylesheet" href="/board.css" />
+  <link rel="stylesheet" href="/board.css?v=animations-45" />
 </head>
 <body>
   <div id="lobbyOverlay" class="lobby-overlay">
@@ -66,6 +66,7 @@
               <div class="board-overlay sea-overlay" id="seaLanes"></div>
               <div class="board-overlay dock-overlay" id="dockSlots"></div>
               <div class="board-overlay port-overlay" id="portSlots"></div>
+              <div class="board-overlay destination-zone-overlay" id="destinationZones"></div>
               <div class="board-overlay pirate-overlay" id="pirateSlots"></div>
               <div class="board-overlay navigator-overlay" id="navigatorSlots"></div>
               <div class="board-overlay insurance-overlay" id="insuranceSlot"></div>
@@ -88,6 +89,7 @@
             <button id="newGameBtn" type="button">新局</button>
             <button id="aiStepBtn" type="button">AI 一步</button>
             <button id="aiRoundBtn" type="button">AI 一轮</button>
+            <button id="animationToggleBtn" type="button"></button>
           </div>
         </section>
 
@@ -138,6 +140,6 @@
     </form>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/board.js?v=player-name-12" defer></script>
+  <script src="/board.js?v=animations-45" defer></script>
 </body>
 </html>

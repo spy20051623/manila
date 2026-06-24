@@ -7,7 +7,140 @@ let shipStarts = {};
 let navigatorMoves = {};
 let toastTimer = null;
 let dismissedSettlementKey = "";
+let actionEventSeq = null;
 const DEBUG_SHOW_ALL_HOTSPOTS = false;
+const DESIGN_VIEWPORT = { width: 1432, height: 828 };
+const HELP_CONTENT = {
+  global: {
+    title: "全局",
+    body: [
+      "玩家扮演马尼拉港口的商人，通过竞拍港务长、购买货物股份、派遣同伙押注货船、港口、船坞、海盗船、领航员和保险商等位置来赚取比索。",
+      "游戏目标是让自己的最终财富最高。最终财富 = 现金 + 持有股份的当前黑市价值 - 未赎回贷款惩罚。股份、贷款和破产细则见“玩家”帮助。",
+      "游戏中有 4 种货物：人参、肉豆蔻、丝绸、玉石。每种货物都有黑市价值轨道：0、5、10、20、30。成功抵达马尼拉的货物会在回合结算后升值一格。",
+      "任意一种货物的黑市价值达到 30 时，游戏会在当前回合结算完成后结束。最终财富最高的玩家获胜，财富相同可以并列。",
+      "每轮称为一次航行。流程依次为：竞拍港务长、港务长购买股份、港务长选择 3 种出航货物、港务长设置 3 艘货船起点，然后进入放置同伙与移动货船的循环，最后结算。",
+      "4 人规则下，每轮有 3 个放置阶段和 3 次移动阶段：放置同伙 1、移动 1、放置同伙 2、移动 2、放置同伙 3、领航员、移动 3、结算。",
+      "港务长由每轮竞拍决定。竞拍中玩家可以出一个高于当前最高价的价格，或放弃竞拍；玩家一旦放弃，本轮竞拍不能再次出价。",
+      "玩家不能出超过自己可支付能力的价格。可支付能力包括当前现金，以及可以通过抵押未抵押股份获得的贷款。最高出价者成为本轮港务长，并立即向港口钱箱支付出价。",
+      "港务长在每轮开始时可以购买 1 张公开供应中的货物股份，也可以不买；随后从 4 种货物中选择 3 种装船出航，并设置这 3 艘货船的起点。",
+      "货船起点必须是 0 到 5，且 3 艘出航货船起点数字总和必须等于 9。关于货船、到港、进入船坞和被海盗船掠夺的细则见“货船”帮助。",
+      "放置阶段从港务长开始，按固定玩家顺序轮流行动。玩家必须放置 1 个同伙，不能主动放弃。各位置的规则分别见“货船”“港口”“船坞”“海盗船”“领航员”“保险商”帮助。",
+      "移动阶段会掷出本轮出航货物对应的骰子，并分别移动对应货船。货船越过 13 立即到港；刚好停在 13 时需要根据海盗船规则处理；第 3 次移动后仍未到港的船进入船坞。",
+      "回合结算内容包括：海盗船掠夺、确定货船进入港口或船坞、支付海盗收益、支付成功到港货船收益、支付港口和船坞收益、保险商赔付、货物升值，并回收同伙。",
+      "全局区显示当前局号、回合、阶段、行动玩家和港务长。它用于判断当前处于哪一步流程，以及现在轮到哪位玩家行动。",
+    ],
+  },
+  players: {
+    title: "玩家",
+    body: [
+      "玩家区显示每名玩家的现金、股份、同伙状态和当前行动状态。每名玩家开局拥有 30 比索现金、随机 2 张初始货物股份和 3 个同伙。",
+      "现金用于支付竞拍港务长的出价、购买货物股份、放置同伙的费用，以及保险员需要承担的船坞赔付。港务长出价会立即支付给港口钱箱。",
+      "股份代表玩家持有的货物份额。每种货物有 5 张股份，货物黑市价值轨道为 0、5、10、20、30。港务长每轮最多购买 1 张公开供应中的股份，购买价格为该货物当前黑市价值，但最低价格为 5 比索。",
+      "游戏结束时，玩家最终财富 = 现金 + 持有股份的当前黑市价值 - 未赎回贷款惩罚。每张未赎回贷款对应的抵押股份在终局扣 15 比索。",
+      "玩家不需要主动抵押或赎回股份。只有当玩家必须支付费用但现金不足时，才会自动抵押未抵押股份获得贷款。每抵押 1 张股份，立即获得 12 比索；抵押股份仍属于玩家，但终局每张未赎回抵押股份扣 15 比索。",
+      "可能触发自动抵押的强制支付包括：支付港务长竞拍价、支付放置同伙费用、保险员支付船坞赔偿。",
+      "同伙是玩家每轮放置到货船、港口、船坞、海盗船、领航员岛或保险商位置的棋子。玩家放置同伙时必须有尚未使用的同伙、选择可用空位，并支付该位置要求的费用；保险商位置不需要支付费用。",
+      "4 人规则下每轮有 3 个放置阶段，正常情况下每名玩家会在本轮放完自己的 3 个同伙。同一玩家可以在同一艘船、同一区域或多个区域放置多个同伙，只要位置合法。",
+      "放置阶段不允许主动放弃。轮到玩家放置时，必须选择一个合法位置放置 1 个同伙。",
+      "破产状态会在玩家放置前自动判定：当玩家没有可抵押股份，且当前现金低于当前局面下任何一个可行放置操作的费用时，会进入破产状态。进入破产状态后，本轮航行内无法解除。",
+      "破产状态下，玩家不能选择普通放置位置，只能作为偷渡客放置到货船。若仍有现金，必须支付所有剩余现金；若现金为 0，则免费放置。",
+      "破产玩家作为偷渡客时，只能选择当前可用费用最低的货船；如果多艘货船费用同为最低，只能选择 ID 最小的船。如果没有任何可用货船空位，会自动偷渡到 ID 最小的仍在本轮出航货船上。",
+      "无空位偷渡不占用货船位置，也不影响该船后续普通登船格。无空位偷渡者不参与货船收益平分；该船正常船员先平分收益后，偷渡者获得等同于单个普通船员的收益。",
+    ],
+  },
+  ships: {
+    title: "货船",
+    body: [
+      "每轮只有 3 种货物会装船出航，剩余 1 种货物本轮不上船。未出航货物不能放置货船同伙，不会掷对应骰子，也不会在本轮升值。",
+      "玩家可以把同伙放到仍在航行中、尚未到港的出航货船上。放置时必须使用该货船当前费用最低的空位，并立即支付对应费用。",
+      "货船收益按货物固定：人参到港总收益 18，肉豆蔻 24，丝绸 30，玉石 36。对应登船费用分别为：人参 1/2/3，肉豆蔻 2/3/4，丝绸 3/4/5，玉石 3/4/5/5。",
+      "如果货船成功抵达马尼拉，船上所有参与分红的同伙平分该货物总收益。",
+      "如果货船未到港并进入船坞，船上同伙没有货船收益。如果货船被海盗船掠夺，船上原有同伙没有收益。",
+      "每次移动阶段会掷出本轮出航货物对应的骰子，并分别移动对应货船。骰子点数必须完整移动。",
+      "货船越过 13 时立即到港，多余点数忽略；货船刚好停在 13 时不会自动到港，需要按海盗船规则处理；第 3 次移动结束后仍未到港的船进入船坞。",
+      "破产玩家可能作为偷渡客登上货船。偷渡客的支付、可选货船和收益规则见“玩家”帮助。",
+    ],
+  },
+  actions: {
+    title: "行动",
+    body: [
+      "行动区显示当前玩家在当前阶段可以执行的操作。每次轮到玩家行动时，必须从当前可执行行动中选择一个并完成。",
+      "需要输入数值、选择货物、选择货船或确认目标时，相关控件会出现在行动区。",
+      "常用放置操作也可以通过点击棋盘上对应区域的按钮触发，效果与在行动区选择相同。",
+    ],
+  },
+  events: {
+    title: "事件",
+    body: [
+      "事件区记录游戏发生过的关键事件，最新事件排在上方。",
+      "这里用于回看竞拍、购买股份、选择货物、设置起点、放置同伙、货船移动、海盗船行动、收益结算和货物升值等结果。",
+    ],
+  },
+  dock: {
+    title: "船坞",
+    body: [
+      "船坞用于押注有货船未能抵达马尼拉。船坞共有 A、B、C 三个位置。",
+      "放置费用和成功收益为：船坞 A 费用 4、收益 6；船坞 B 费用 3、收益 8；船坞 C 费用 2、收益 15。",
+      "结算时，第 1 艘未到港的船进入船坞 A，第 2 艘未到港的船进入船坞 B，第 3 艘未到港的船进入船坞 C。",
+      "如果对应船坞位置有船进入，该船坞上的同伙获得对应收益；如果对应船坞没有船，该船坞上的同伙没有收益。",
+      "船坞收益优先由保险员支付；如果本轮没有保险员，则由港口钱箱支付。",
+    ],
+  },
+  port: {
+    title: "港口",
+    body: [
+      "港口用于押注有货船成功抵达马尼拉。港口共有 A、B、C 三个位置。",
+      "放置费用和成功收益为：港口 A 费用 4、收益 6；港口 B 费用 3、收益 8；港口 C 费用 2、收益 15。",
+      "结算时，第 1 艘到港的船对应港口 A，第 2 艘到港的船对应港口 B，第 3 艘到港的船对应港口 C。",
+      "如果对应港口位置有船进入，该港口上的同伙获得对应收益；如果对应港口没有船，该港口上的同伙没有收益。",
+      "成功到港的货物会在回合结算后升值一格。",
+    ],
+  },
+  insurance: {
+    title: "保险商",
+    body: [
+      "保险商位置不需要支付放置费用。玩家把同伙放到保险商位置时，立即从港口钱箱获得 10 比索。",
+      "放在保险商位置的同伙成为本轮保险员。保险员承担本轮船坞赔付责任。",
+      "结算时，如果有船进入船坞，且对应船坞位置有同伙获奖，则由保险员支付船坞收益。",
+      "如果保险员本轮同时从其他位置获得收益，可以先收取收益，再支付赔偿。",
+      "如果保险员现金不足，会自动抵押股份贷款支付。若保险员现金和贷款能力仍不足，则尽力支付，剩余部分由港口钱箱补足。",
+      "如果本轮没有船坞收益需要支付，保险员无需赔偿，保留放置时获得的 10 比索。",
+    ],
+  },
+  pirates: {
+    title: "海盗船",
+    body: [
+      "海盗船有 2 个位置，每个位置费用为 5。先放置的位置是海盗船长，后放置的位置是副手。只有仍留在海盗船上的同伙会参与后续海盗登船、掠夺和收益分配。",
+      "第 2 次掷骰移动结束后，如果有货船刚好停在 13，海盗可以尝试登船。海盗船长先决定是否登船，副手随后决定是否登船。",
+      "海盗只能登上刚好停在 13 的货船，并且必须占用该货船的空格。如果目标货船没有空格，则不能登船。",
+      "海盗一旦登船，会加入该货船并按货船乘员参与货船收益结算。已登船的海盗不再参与后续海盗决策或海盗收益。",
+      "如果海盗船长登船且副手仍留在海盗船上，副手会被视作海盗船长。如果副手也登船，则海盗船上不再有海盗。",
+      "第 3 次掷骰移动结束后，如果有货船刚好停在 13，且海盗船上仍有海盗，则海盗掠夺该船。被掠夺船上的原有同伙全部没有收益。",
+      "海盗收益等于被掠夺货船的到港总收益，只分给第 3 次移动结束时仍留在海盗船上的海盗。已登船的海盗不参与分配，没有任何收益。",
+      "掠夺后，由当前海盗船长决定该船进入港口还是船坞。进入港口时，该货物视为成功到港，回合结束后升值；进入船坞时，该货物不升值。",
+      "如果第 3 次移动后船刚好停在 13，但海盗船上没有海盗，则该船视为成功到港。",
+    ],
+  },
+  navigator: {
+    title: "领航员",
+    body: [
+      "领航员位置在第 3 次掷骰移动前发动。领航员共有 2 个位置：小领航员和大领航员。",
+      "小领航员放置费用为 2，可以将 1 艘未到港船前进或后退 1 格。",
+      "大领航员放置费用为 5，可以将 1 艘未到港船移动最多 2 格，或将 2 艘未到港船各移动 1 格。",
+      "领航员行动顺序为：小领航员先行动，大领航员后行动。",
+      "领航员可以选择不移动。领航员可以向前或向后移动船。已经到港的船不能被领航员移动。",
+      "领航员把船推过 13 时，该船立即到港。领航员把船推到 13 不触发海盗船；海盗船只在掷骰移动结束后触发。",
+    ],
+  },
+};
+
+function syncViewportScale() {
+  const scale = Math.min(window.innerWidth / DESIGN_VIEWPORT.width, window.innerHeight / DESIGN_VIEWPORT.height);
+  document.documentElement.style.setProperty("--ui-scale", String(scale));
+}
+
+syncViewportScale();
+window.addEventListener("resize", syncViewportScale);
 
 const $ = (id) => document.getElementById(id);
 const marketValues = [0, 5, 10, 20, 30];
@@ -71,7 +204,12 @@ async function refresh(options = {}) {
   }
   const data = await api(`/games/${gameId}/state?${viewerQuery()}`);
   state = data.game;
-  await loadLegalActions();
+  const loadedEventSeq = await loadLegalActions();
+  if (state && loadedEventSeq !== null && loadedEventSeq !== state.eventSeq) {
+    const latest = await api(`/games/${gameId}/state?${viewerQuery()}`);
+    state = latest.game;
+    await loadLegalActions();
+  }
   syncTransientControls();
   render();
   if (options.auto !== false) {
@@ -81,11 +219,14 @@ async function refresh(options = {}) {
 
 async function loadLegalActions() {
   actions = [];
-  if (!state || !state.currentPlayer || state.status === "ended") return;
+  actionEventSeq = state?.eventSeq ?? null;
+  if (!state || !state.currentPlayer || state.status === "ended") return actionEventSeq;
   const localPlayerId = getLocalPlayerId();
-  if (Number(state.currentPlayer) !== localPlayerId) return;
+  if (Number(state.currentPlayer) !== localPlayerId) return actionEventSeq;
   const data = await api(`/games/${gameId}/players/${localPlayerId}/actions?${viewerQuery()}`);
   actions = data.actions || [];
+  actionEventSeq = data.eventSeq ?? actionEventSeq;
+  return actionEventSeq;
 }
 
 async function submitAction(action, payloadOverride) {
@@ -100,7 +241,7 @@ async function submitAction(action, payloadOverride) {
     playerId: localPlayerId,
     type: action.type,
     payload,
-    expectedEventSeq: state.eventSeq,
+    expectedEventSeq: actionEventSeq ?? state.eventSeq,
   };
   await api(`/games/${gameId}/actions?${viewerQuery()}`, { method: "POST", body: JSON.stringify(requestBody) });
   resetTransientControls();
@@ -198,6 +339,7 @@ function render() {
 }
 
 function renderEmpty() {
+  actionEventSeq = null;
   for (const id of ["gameIdText", "roundText", "phaseText", "currentPlayerText", "harborMasterText"]) {
     $(id).textContent = "-";
   }
@@ -1337,6 +1479,26 @@ function showToast(message) {
   toastTimer = setTimeout(() => el.classList.remove("show"), 3200);
 }
 
+function openHelp(helpId) {
+  const help = HELP_CONTENT[helpId];
+  if (!help) return;
+  $("helpTitle").textContent = help.title;
+  $("helpBody").innerHTML = help.body.map((paragraph) => `<p>${escapeHTML(paragraph)}</p>`).join("");
+  $("helpOverlay").hidden = false;
+}
+
+function closeHelp() {
+  $("helpOverlay").hidden = true;
+}
+
+function escapeHTML(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;");
+}
+
 function escapeAttr(value) {
   return String(value).replaceAll("&", "&amp;").replaceAll('"', "&quot;").replaceAll("<", "&lt;");
 }
@@ -1344,5 +1506,19 @@ function escapeAttr(value) {
 $("newGameBtn").onclick = () => createGame().catch(showError);
 $("aiStepBtn").onclick = () => aiStep().catch(showError);
 $("aiRoundBtn").onclick = () => aiAdvanceRound().catch(showError);
+$("helpCloseBtn").onclick = closeHelp;
+$("helpOverlay").addEventListener("click", (event) => {
+  if (event.target === $("helpOverlay")) closeHelp();
+});
+document.addEventListener("click", (event) => {
+  const button = event.target.closest(".help-button[data-help]");
+  if (!button) return;
+  event.preventDefault();
+  event.stopPropagation();
+  openHelp(button.dataset.help);
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeHelp();
+});
 
 refresh().catch(() => renderEmpty());

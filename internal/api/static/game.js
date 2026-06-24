@@ -2697,7 +2697,7 @@ function renderContextControls() {
     const max = Number(bid.payload?.maxBid || min);
     box.appendChild(contextCard("竞拍港务长", `
       <div class="bid-input-row">
-        <input id="bidAmountInput" type="number" min="${min}" max="${max}" value="${min}" />
+        ${numberStepperHTML({ id: "bidAmountInput", min, max, value: min })}
       </div>
       <div class="empty-note bid-range-note">允许范围 ${min} 到 ${max}。</div>
       <div class="inline-controls bid-button-row">
@@ -2705,7 +2705,7 @@ function renderContextControls() {
         ${passBid ? `<button id="bidPassBtn" type="button">放弃</button>` : ""}
       </div>
     `));
-    $("bidAmountInput").onchange = () => clampNumberInput($("bidAmountInput"), min, max);
+    bindNumberStepper(box, "#bidAmountInput", min, max);
     $("bidSubmitBtn").onclick = () => submitBid(bid).catch(showError);
     if (passBid) $("bidPassBtn").onclick = () => submitAction(passBid).catch(showError);
   }
@@ -2722,28 +2722,31 @@ function renderContextControls() {
 
   if (state.phase === "HarborMasterSetShips") {
     const ids = selectedShipIds();
-    const controls = ids.map((id) => `
-      <label>${goodsName(id)}
-        <input class="ship-start-input" data-ship-id="${id}" type="number" min="0" max="5" value="${shipStarts[id] ?? 3}" />
-      </label>
-    `).join("");
+    const controls = ids.map((id) => {
+      const value = clampIntegerValue(shipStarts[id] ?? 3, 0, 5);
+      shipStarts[id] = value;
+      return `
+      ${sliderNumberHTML({
+        label: goodsName(id),
+        inputClass: "ship-start-input",
+        sliderClass: "ship-start-slider",
+        min: 0,
+        max: 5,
+        value,
+        attrs: `data-ship-id="${id}"`,
+      })}
+    `;
+    }).join("");
     box.appendChild(contextCard("设置起点", `
       <div class="input-grid">${controls}</div>
       <div class="inline-controls action-row">
-        <button id="startsSubmitBtn" type="button">确认起点</button>
         <span id="startsSumText" class="empty-note"></span>
+        <button id="startsSubmitBtn" type="button">确认起点</button>
       </div>
     `));
-    box.querySelectorAll(".ship-start-input").forEach((input) => {
-      input.oninput = () => {
-        shipStarts[input.dataset.shipId] = Number(input.value);
-        updateStartsSum();
-      };
-      input.onchange = () => {
-        const value = clampNumberInput(input, 0, 5);
-        shipStarts[input.dataset.shipId] = value;
-        updateStartsSum();
-      };
+    bindSliderNumberControls(box, ".ship-start-input", 0, 5, (input, value) => {
+      shipStarts[input.dataset.shipId] = value;
+      updateStartsSum();
     });
     $("startsSubmitBtn").onclick = () => submitShipStarts().catch(showError);
     updateStartsSum();
@@ -2752,38 +2755,139 @@ function renderContextControls() {
   if (state.phase === "NavigatorAction") {
     const moveAction = actions.find((a) => a.type === "NavigatorMove");
     const step = state.round?.navigatorStep === "big" ? "大领航员" : "小领航员";
+    const maxMove = state.round?.navigatorStep === "big" ? 2 : 1;
     const ids = selectedShipIds();
     const controls = ids.map((id) => {
       const ship = getShip(id);
       const locked = ship?.status !== "sailing";
       if (locked) navigatorMoves[id] = 0;
+      const value = locked ? 0 : clampIntegerValue(navigatorMoves[id] || 0, -maxMove, maxMove);
+      navigatorMoves[id] = value;
       return `
-      <label>${goodsName(id)}
-        <input class="nav-move-input" data-ship-id="${id}" type="number" min="-2" max="2" value="${locked ? 0 : (navigatorMoves[id] || 0)}" ${locked ? "disabled" : ""} />
-      </label>
+      ${sliderNumberHTML({
+        label: goodsName(id),
+        inputClass: "nav-move-input",
+        sliderClass: "nav-move-slider",
+        min: -maxMove,
+        max: maxMove,
+        value,
+        disabled: locked,
+        attrs: `data-ship-id="${id}"`,
+      })}
     `;
     }).join("");
     box.appendChild(contextCard(step, `
       <div class="input-grid">${controls}</div>
       <div class="inline-controls action-row">
-        <button id="navSubmitBtn" type="button" ${moveAction ? "" : "disabled"}>移动</button>
         <span id="navMoveHint" class="empty-note">${state.round?.navigatorStep === "big" ? "总移动量不超过 2；全 0 表示不移动。" : "总移动量不超过 1；全 0 表示不移动。"}</span>
+        <button id="navSubmitBtn" type="button" ${moveAction ? "" : "disabled"}>移动</button>
       </div>
     `));
-    box.querySelectorAll(".nav-move-input").forEach((input) => {
-      input.oninput = () => {
-        navigatorMoves[input.dataset.shipId] = parseNavigatorInputValue(input.value);
-        updateNavigatorMoveState();
-      };
-      input.onchange = () => {
-        const value = clampNumberInput(input, -2, 2);
-        navigatorMoves[input.dataset.shipId] = value;
-        updateNavigatorMoveState();
-      };
+    bindSliderNumberControls(box, ".nav-move-input", -maxMove, maxMove, (input, value) => {
+      navigatorMoves[input.dataset.shipId] = value;
+      updateNavigatorMoveState();
     });
     $("navSubmitBtn").onclick = () => submitNavigatorMove(moveAction).catch(showError);
     updateNavigatorMoveState();
   }
+}
+
+function numberStepperHTML({ id = "", inputClass = "", min, max, value, disabled = false, attrs = "" }) {
+  const disabledAttr = disabled ? " disabled" : "";
+  const idAttr = id ? ` id="${escapeAttr(id)}"` : "";
+  const inputMode = min < 0 ? "text" : "numeric";
+  const classes = ["stepper-input", inputClass].filter(Boolean).join(" ");
+  return `<div class="number-stepper${disabled ? " disabled" : ""}">
+    <button class="stepper-btn stepper-decrease" type="button" data-step="-1" aria-label="减少"${disabledAttr}></button>
+    <input${idAttr} class="${escapeAttr(classes)}" type="text" inputmode="${inputMode}" autocomplete="off" data-min="${min}" data-max="${max}" data-value="${value}" value="${value}" ${attrs}${disabledAttr} />
+    <button class="stepper-btn stepper-increase" type="button" data-step="1" aria-label="增加"${disabledAttr}></button>
+  </div>`;
+}
+
+function sliderNumberHTML({ label, inputClass = "", sliderClass = "", min, max, value, disabled = false, attrs = "" }) {
+  const disabledAttr = disabled ? " disabled" : "";
+  const inputMode = min < 0 ? "text" : "numeric";
+  const inputClasses = ["range-number-input", inputClass].filter(Boolean).join(" ");
+  const sliderClasses = ["range-slider", sliderClass].filter(Boolean).join(" ");
+  return `<label class="range-number-row">
+    <span class="range-number-label">${escapeHTML(label)}</span>
+    <input class="${escapeAttr(sliderClasses)}" type="range" min="${min}" max="${max}" step="1" value="${value}" ${attrs}${disabledAttr} />
+    <input class="${escapeAttr(inputClasses)}" type="text" inputmode="${inputMode}" autocomplete="off" data-min="${min}" data-max="${max}" data-value="${value}" value="${value}" ${attrs}${disabledAttr} />
+  </label>`;
+}
+
+function bindNumberStepper(root, inputSelector, fallbackMin, fallbackMax, onValueChange = () => {}) {
+  root.querySelectorAll(inputSelector).forEach((input) => {
+    const min = Number(input.dataset.min ?? fallbackMin);
+    const max = Number(input.dataset.max ?? fallbackMax);
+    const stepper = input.closest(".number-stepper");
+    const setValue = (rawValue, updateText = true) => {
+      const value = clampIntegerValue(rawValue, min, max);
+      input.dataset.value = String(value);
+      if (updateText) input.value = String(value);
+      onValueChange(input, value);
+      syncStepperButtons(stepper, input, value, min, max);
+      return value;
+    };
+    stepper?.querySelectorAll(".stepper-btn").forEach((button) => {
+      button.onclick = () => {
+        if (input.disabled) return;
+        const current = Number.isFinite(Number(input.dataset.value))
+          ? Number(input.dataset.value)
+          : clampIntegerValue(input.value, min, max);
+        setValue(current + Number(button.dataset.step || 0));
+        input.focus();
+      };
+    });
+    input.oninput = () => {
+      const draft = parseIntegerDraft(input.value);
+      input.dataset.value = draft === null ? "" : String(draft);
+      onValueChange(input, draft === null ? NaN : draft);
+      syncStepperButtons(stepper, input, draft, min, max);
+    };
+    input.onchange = () => setValue(input.value);
+    input.onblur = () => setValue(input.value);
+    setValue(input.value);
+  });
+}
+
+function bindSliderNumberControls(root, inputSelector, fallbackMin, fallbackMax, onValueChange = () => {}) {
+  root.querySelectorAll(inputSelector).forEach((input) => {
+    const min = Number(input.dataset.min ?? fallbackMin);
+    const max = Number(input.dataset.max ?? fallbackMax);
+    const slider = input.closest(".range-number-row")?.querySelector(".range-slider");
+    const setValue = (rawValue, updateText = true) => {
+      const value = clampIntegerValue(rawValue, min, max);
+      input.dataset.value = String(value);
+      if (updateText) input.value = String(value);
+      if (slider) slider.value = String(value);
+      onValueChange(input, value);
+      return value;
+    };
+    if (slider) {
+      slider.oninput = () => setValue(slider.value);
+      slider.onchange = () => setValue(slider.value);
+    }
+    input.oninput = () => {
+      const draft = parseIntegerDraft(input.value);
+      input.dataset.value = draft === null ? "" : String(draft);
+      if (draft !== null && slider) slider.value = String(clampIntegerValue(draft, min, max));
+      onValueChange(input, draft === null ? NaN : draft);
+    };
+    input.onchange = () => setValue(input.value);
+    input.onblur = () => setValue(input.value);
+    setValue(input.value);
+  });
+}
+
+function syncStepperButtons(stepper, input, value, min, max) {
+  if (!stepper) return;
+  const decrease = stepper.querySelector(".stepper-decrease");
+  const increase = stepper.querySelector(".stepper-increase");
+  const numericValue = Number(value);
+  const hasValue = Number.isFinite(numericValue);
+  if (decrease) decrease.disabled = input.disabled || (hasValue && numericValue <= min);
+  if (increase) increase.disabled = input.disabled || (hasValue && numericValue >= max);
 }
 
 function contextCard(title, html) {
@@ -2920,24 +3024,37 @@ async function submitBid(action) {
   const min = Number(action.payload?.minBid || 1);
   const max = Number(action.payload?.maxBid || min);
   const input = $("bidAmountInput");
-  const amount = clampIntegerValue(input?.value, min, max);
-  if (input) input.value = String(amount);
+  const amount = clampNumberInput(input, min, max);
   await submitAction(action, { amount });
 }
 
 async function promptBid(action) {
-  const min = Number(action.payload?.minBid || 1);
-  const max = Number(action.payload?.maxBid || min);
-  const value = window.prompt(`请输入出价，范围 ${min}-${max}`, String(min));
-  if (value === null) return;
-  const amount = clampIntegerValue(value, min, max);
-  await submitAction(action, { amount });
+  renderContextControls();
+  const input = $("bidAmountInput");
+  if (!input) {
+    showToast("请在竞价控件中出价。");
+    return;
+  }
+  input.focus();
+  input.select();
+  input.closest(".context-card")?.scrollIntoView({ block: "nearest" });
 }
 
 function clampNumberInput(input, min, max) {
   const amount = clampIntegerValue(input?.value, min, max);
-  if (input) input.value = String(amount);
+  if (input) {
+    input.value = String(amount);
+    input.dataset.value = String(amount);
+  }
   return amount;
+}
+
+function parseIntegerDraft(value) {
+  const text = String(value ?? "").trim();
+  if (text === "" || text === "-" || text === "+") return null;
+  const parsed = Number(text);
+  if (!Number.isFinite(parsed)) return null;
+  return Math.trunc(parsed);
 }
 
 function clampIntegerValue(value, min, max) {
@@ -2960,6 +3077,12 @@ async function submitSelectedGoods() {
 async function submitShipStarts() {
   const action = actions.find((a) => a.type === "SetShipStarts");
   if (!action) return;
+  document.querySelectorAll(".ship-start-input").forEach((input) => {
+    const min = Number(input.dataset.min ?? 0);
+    const max = Number(input.dataset.max ?? 5);
+    const value = clampNumberInput(input, min, max);
+    shipStarts[input.dataset.shipId] = value;
+  });
   const ids = selectedShipIds();
   const starts = {};
   let sum = 0;
@@ -3008,11 +3131,11 @@ function parseNavigatorInputValue(value) {
 
 function clampNavigatorInput(input) {
   if (!input) return 0;
-  const parsed = Number(input.value);
-  let value = Number.isFinite(parsed) ? Math.trunc(parsed) : 0;
-  if (value < -2) value = -2;
-  if (value > 2) value = 2;
+  const min = Number(input.dataset.min ?? -2);
+  const max = Number(input.dataset.max ?? 2);
+  let value = clampIntegerValue(input.value, min, max);
   input.value = String(value);
+  input.dataset.value = String(value);
   return value;
 }
 

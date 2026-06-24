@@ -1639,10 +1639,10 @@ input {
 
 .context-card {
   display: grid;
-  gap: 10px;
+  gap: 6px;
   border: 1px solid rgba(116, 72, 37, 0.26);
   border-radius: 8px;
-  padding: 12px;
+  padding: 9px 10px;
   background:
     radial-gradient(circle at 88% 12%, rgba(215, 166, 66, 0.12), transparent 28%),
     repeating-linear-gradient(96deg, rgba(76, 47, 25, 0.04) 0 1px, transparent 1px 8px),
@@ -1672,7 +1672,7 @@ input {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: 4px;
 }
 
 .context-actions button,
@@ -1692,10 +1692,8 @@ input {
   justify-content: center;
 }
 
-.bid-input-row input {
-  width: 110px;
-  text-align: center;
-  font-weight: 900;
+.bid-input-row .number-stepper {
+  width: min(100%, 198px);
 }
 
 .bid-button-row {
@@ -1720,27 +1718,132 @@ input {
 
 .input-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
+  gap: 2px;
 }
 
 .input-grid label {
-  display: grid;
-  gap: 4px;
   color: var(--muted);
   font-size: 12px;
   font-weight: 800;
 }
 
-.input-grid input {
+.number-stepper {
+  display: grid;
+  grid-template-columns: 44px minmax(40px, 1fr) 44px;
+  gap: 5px;
+  align-items: center;
   width: 100%;
-  min-height: 32px;
-  padding: 5px 8px;
+  max-width: 198px;
+  margin: 0 auto;
+}
+
+.stepper-btn {
+  position: relative;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  border-radius: 8px;
+}
+
+.stepper-btn::before,
+.stepper-btn::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 16px;
+  height: 3px;
+  border-radius: 999px;
+  background: #4a2c18;
+  transform: translate(-50%, -50%);
+}
+
+.stepper-increase::after {
+  transform: translate(-50%, -50%) rotate(90deg);
+}
+
+.stepper-decrease::after {
+  display: none;
+}
+
+.stepper-btn:disabled::before,
+.stepper-btn:disabled::after {
+  background: rgba(74, 44, 24, 0.42);
+}
+
+.stepper-input,
+.input-grid .stepper-input {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding: 7px 6px;
   text-align: center;
+  font-weight: 900;
+  font-size: 17px;
+  line-height: 1.1;
+}
+
+.stepper-input::-webkit-outer-spin-button,
+.stepper-input::-webkit-inner-spin-button {
+  margin: 0;
+  appearance: none;
+}
+
+.stepper-input {
+  appearance: textfield;
+}
+
+.number-stepper.disabled .stepper-input,
+.input-grid .stepper-input:disabled {
+  color: #788489;
+  background: rgba(233, 229, 216, 0.72);
+  cursor: not-allowed;
+}
+
+.number-stepper.disabled .stepper-btn {
+  cursor: not-allowed;
+}
+
+.range-number-row {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) 38px;
+  gap: 6px;
+  align-items: center;
+  min-height: 28px;
+}
+
+.range-number-label {
+  color: #4a2c18;
+  font-size: 12px;
+  font-weight: 900;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.range-slider {
+  width: 100%;
+  min-height: 22px;
+  accent-color: #8a5a24;
+  cursor: pointer;
+}
+
+.range-slider:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.range-number-input,
+.input-grid .range-number-input {
+  width: 38px;
+  min-height: 28px;
+  padding: 3px 4px;
+  text-align: center;
+  font-size: 13px;
   font-weight: 900;
 }
 
-.input-grid input:disabled {
+.range-number-input:disabled,
+.input-grid .range-number-input:disabled {
   color: #788489;
   background: rgba(233, 229, 216, 0.72);
   cursor: not-allowed;

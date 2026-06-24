@@ -61,6 +61,118 @@ body {
   display: none !important;
 }
 
+.game-loading .app-shell {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.game-loading-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  color: #fff7e8;
+  background:
+    radial-gradient(circle at 50% 8%, rgba(215, 166, 66, 0.24), transparent 30%),
+    linear-gradient(90deg, rgba(255, 224, 166, 0.045) 1px, transparent 1px) 0 0 / 46px 100%,
+    repeating-linear-gradient(102deg, rgba(255, 238, 194, 0.035) 0 2px, transparent 2px 14px),
+    linear-gradient(135deg, #1d120d 0%, #352016 42%, #4f2f1d 100%);
+}
+
+body:not(.game-loading) .game-loading-screen {
+  display: none;
+}
+
+.game-loading-panel {
+  width: min(460px, calc(100vw - 40px));
+  border: 1px solid rgba(246, 216, 147, 0.28);
+  border-radius: 8px;
+  padding: 26px;
+  background: rgba(36, 24, 16, 0.86);
+  box-shadow: 0 22px 55px rgba(0, 0, 0, 0.34);
+}
+
+.game-loading-eyebrow {
+  margin: 0 0 8px;
+  color: #f2d493;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.game-loading-panel h1 {
+  margin: 0 0 18px;
+  font-size: 28px;
+  line-height: 1.2;
+  letter-spacing: 0;
+}
+
+.game-loading-progress {
+  height: 12px;
+  overflow: hidden;
+  border: 1px solid rgba(246, 216, 147, 0.26);
+  border-radius: 999px;
+  background: rgba(255, 248, 232, 0.16);
+}
+
+.game-loading-bar {
+  width: 0%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #d7a642, #f2d493);
+  transition: width 160ms ease;
+}
+
+.game-loading-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 12px;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.game-loading-status span {
+  color: rgba(255, 247, 232, 0.82);
+  text-align: right;
+}
+
+.game-loading-detail {
+  min-height: 22px;
+  margin: 12px 0 0;
+  color: rgba(255, 247, 232, 0.72);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.game-loading-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.game-loading-actions button {
+  min-height: 36px;
+  border: 1px solid rgba(246, 216, 147, 0.34);
+  border-radius: 6px;
+  padding: 8px 14px;
+  color: #fff7e8;
+  background: rgba(104, 57, 24, 0.94);
+  font-weight: 800;
+}
+
+.game-loading-actions button:hover {
+  border-color: rgba(255, 234, 178, 0.76);
+}
+
+.game-loading-actions button:disabled {
+  opacity: 0.55;
+}
+
 .lobby-overlay {
   position: fixed;
   inset: 0;

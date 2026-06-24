@@ -42,6 +42,36 @@ const DESIGN_VIEWPORT = { width: 1432, height: 828 };
 const BOARD_ANIMATION_DURATION_MS = 1500;
 const GAME_STATE_POLL_VISIBLE_MULTIPLAYER_MS = 1000;
 const GAME_STATE_POLL_IDLE_MS = 5000;
+const LOADING_MAX_ATTEMPTS = 3;
+const GAME_IMAGE_ASSETS = [
+  "/assets/board-icons/icon-insurance.png",
+  "/assets/board-icons/icon-pilots.png",
+  "/assets/board-icons/icon-pirates.png",
+  "/assets/board-icons/icon-port.png",
+  "/assets/board-icons/icon-shipyard.png",
+  "/assets/goods-icons/goods-ginseng.png",
+  "/assets/goods-icons/goods-jade.png",
+  "/assets/goods-icons/goods-nutmeg.png",
+  "/assets/goods-icons/goods-silk.png",
+  "/assets/manila-board-base.png",
+  "/assets/ships/wood-boat-top.png",
+  "/assets/ui/action-panel-parchment-360x291.png",
+  "/assets/ui/events-panel-parchment-360x437.png",
+  "/assets/ui/global-panel-oak-338x218.png",
+  "/assets/ui/ledger-paper.png",
+  "/assets/ui/panel-dark-wood.png",
+  "/assets/ui/panel-light-parchment.png",
+  "/assets/ui/panel-parchment.png",
+  "/assets/ui/players-panel-oak-466x218.png",
+  "/assets/ui/ships-panel-oak-214x218.png",
+  "/assets/ui/wood-plaque.png",
+];
+const LOADING_TOTAL_ITEMS = GAME_IMAGE_ASSETS.length + 2;
+const loadedGameImages = new Set();
+const skippedGameImages = new Set();
+let failedGameImages = [];
+let loadingDoneItems = 0;
+let loadingStateLoaded = false;
 const HELP_CONTENT = {
   global: {
     title: "全局",
@@ -217,6 +247,194 @@ async function api(path, options = {}) {
   return data;
 }
 
+function setupGameLoadingControls() {
+  const retry = $("gameLoadingRetryBtn");
+  const continueButton = $("gameLoadingContinueBtn");
+  const returnButton = $("gameLoadingReturnBtn");
+  if (retry) retry.onclick = () => resumeGameLoading(false).catch(showGameLoadingFailure);
+  if (continueButton) continueButton.onclick = () => resumeGameLoading(true).catch(showGameLoadingFailure);
+  if (returnButton) returnButton.onclick = () => returnToLobby();
+}
+
+function resetGameLoadingProgress() {
+  loadingDoneItems = 0;
+  loadingStateLoaded = false;
+  failedGameImages = [];
+  loadedGameImages.clear();
+  skippedGameImages.clear();
+  document.body.classList.add("game-loading");
+  setGameLoadingBusy(false);
+  updateGameLoadingProgress("准备资源", "");
+}
+
+function markGameLoadingItem(label, detail = "") {
+  loadingDoneItems = Math.min(LOADING_TOTAL_ITEMS, loadingDoneItems + 1);
+  updateGameLoadingProgress(label, detail);
+}
+
+function updateGameLoadingProgress(label, detail = "") {
+  const percent = Math.round((loadingDoneItems / LOADING_TOTAL_ITEMS) * 100);
+  const progress = $("gameLoadingProgress");
+  const bar = $("gameLoadingBar");
+  const percentText = $("gameLoadingPercent");
+  const labelText = $("gameLoadingText");
+  const detailText = $("gameLoadingDetail");
+  if (progress) progress.setAttribute("aria-valuenow", String(percent));
+  if (bar) bar.style.width = `${percent}%`;
+  if (percentText) percentText.textContent = `${percent}%`;
+  if (labelText) labelText.textContent = label;
+  if (detailText) detailText.textContent = detail;
+}
+
+function setGameLoadingBusy(busy) {
+  const retry = $("gameLoadingRetryBtn");
+  const continueButton = $("gameLoadingContinueBtn");
+  if (retry) retry.hidden = true;
+  if (continueButton) continueButton.hidden = true;
+  if (retry) retry.disabled = busy;
+  if (continueButton) continueButton.disabled = busy;
+}
+
+async function bootGamePage() {
+  setupGameLoadingControls();
+  resetGameLoadingProgress();
+  try {
+    markGameLoadingItem("加载基础资源");
+    await resumeGameLoading(false);
+  } catch (err) {
+    showGameLoadingFailure(err);
+  }
+}
+
+async function resumeGameLoading(allowMissingImages) {
+  setGameLoadingBusy(true);
+  if (allowMissingImages) {
+    skipFailedGameImages();
+  }
+  if (!allowMissingImages) {
+    await preloadRemainingGameImages();
+  }
+  await loadBootGameStateWithRetry();
+  finishGameLoading();
+}
+
+async function preloadRemainingGameImages() {
+  const pending = GAME_IMAGE_ASSETS.filter((src) => !loadedGameImages.has(src) && !skippedGameImages.has(src));
+  failedGameImages = [];
+  if (!pending.length) return;
+  updateGameLoadingProgress("加载图片资源", `${loadedGameImages.size + skippedGameImages.size}/${GAME_IMAGE_ASSETS.length}`);
+  const results = await Promise.allSettled(pending.map((src) => loadGameImageWithRetry(src)));
+  failedGameImages = results
+    .map((result, index) => (result.status === "rejected" ? pending[index] : ""))
+    .filter(Boolean);
+  if (failedGameImages.length) {
+    throw createGameLoadingError(
+      "image",
+      "图片资源加载失败",
+      `有 ${failedGameImages.length} 张图片暂时无法加载。`,
+    );
+  }
+}
+
+async function loadGameImageWithRetry(src) {
+  if (loadedGameImages.has(src) || skippedGameImages.has(src)) return;
+  await retryLoadingResource(() => loadGameImage(src), LOADING_MAX_ATTEMPTS);
+  loadedGameImages.add(src);
+  markGameLoadingItem("加载图片资源", `${loadedGameImages.size + skippedGameImages.size}/${GAME_IMAGE_ASSETS.length}`);
+}
+
+function loadGameImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve();
+    img.onerror = () => reject(new Error(`image load failed: ${src}`));
+    img.src = src;
+    if (img.decode) {
+      img.decode().then(resolve).catch(reject);
+    }
+  });
+}
+
+function skipFailedGameImages() {
+  for (const src of failedGameImages) {
+    if (loadedGameImages.has(src) || skippedGameImages.has(src)) continue;
+    skippedGameImages.add(src);
+    markGameLoadingItem("跳过缺失图片", `${loadedGameImages.size + skippedGameImages.size}/${GAME_IMAGE_ASSETS.length}`);
+  }
+  failedGameImages = [];
+}
+
+async function loadBootGameStateWithRetry() {
+  if (loadingStateLoaded) return;
+  updateGameLoadingProgress("加载对局状态", "");
+  await retryLoadingResource(loadBootGameStateOnce, LOADING_MAX_ATTEMPTS).catch((err) => {
+    throw createGameLoadingError("state", "对局状态加载失败", err?.message || "请重试加载。");
+  });
+  loadingStateLoaded = true;
+  markGameLoadingItem("加载完成");
+}
+
+async function loadBootGameStateOnce() {
+  if (!gameId) {
+    throw new Error("缺少对局信息");
+  }
+  const data = await api(`/games/${encodeURIComponent(gameId)}/state`);
+  clearActiveAnimations(false);
+  wsPayloadQueue.length = 0;
+  localPlayerId = Number(data.playerId || 0);
+  await applyRoomPayload(roomFromGamePayload(data), { animate: false });
+  initialRoomLoaded = true;
+  if (state?.status === "ended") {
+    lockFinishedGame();
+    return;
+  }
+  renderPostActionControls();
+}
+
+async function retryLoadingResource(fn, attempts) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await fn(attempt);
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError || new Error("load failed");
+}
+
+function finishGameLoading() {
+  updateGameLoadingProgress("加载完成");
+  document.body.classList.remove("game-loading");
+  setGameLoadingBusy(false);
+  if (state?.status !== "ended") {
+    connectGameSocket();
+    syncGameStatePolling();
+  }
+}
+
+function showGameLoadingFailure(err) {
+  const kind = err?.loadingKind || "state";
+  const retry = $("gameLoadingRetryBtn");
+  const continueButton = $("gameLoadingContinueBtn");
+  updateGameLoadingProgress(err?.message || "加载失败", err?.loadingDetail || "请重试加载。");
+  if (retry) {
+    retry.hidden = false;
+    retry.disabled = false;
+  }
+  if (continueButton) {
+    continueButton.hidden = kind !== "image";
+    continueButton.disabled = false;
+  }
+}
+
+function createGameLoadingError(kind, message, detail) {
+  const err = new Error(message);
+  err.loadingKind = kind;
+  err.loadingDetail = detail;
+  return err;
+}
+
 function getLocalPlayerId() {
   return Number(localPlayerId || 0);
 }
@@ -235,7 +453,9 @@ function clearRoomToken() {
   roomToken = "";
   localStorage.removeItem("manilaRoomToken");
   syncTokenToURL();
-  connectGameSocket();
+  if (!document.body.classList.contains("game-loading")) {
+    connectGameSocket();
+  }
 }
 
 function returnToLobby(options = {}) {
@@ -3285,6 +3505,4 @@ document.addEventListener("keydown", (event) => {
 document.addEventListener("visibilitychange", syncGameStatePolling);
 
 syncAnimationToggleButton();
-refresh().then(() => {
-  if (state?.status !== "ended") connectGameSocket();
-}).catch(showError);
+bootGamePage().catch(showGameLoadingFailure);

@@ -4,9 +4,28 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>马尼拉对局</title>
-  <link rel="stylesheet" href="/board.css?v=board-5" />
+  <link rel="stylesheet" href="/board.css?v=board-6" />
 </head>
-<body>
+<body class="game-loading">
+  <section id="gameLoadingScreen" class="game-loading-screen" aria-label="游戏加载" aria-live="polite">
+    <div class="game-loading-panel">
+      <p class="game-loading-eyebrow">马尼拉</p>
+      <h1>正在加载对局</h1>
+      <div id="gameLoadingProgress" class="game-loading-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <div id="gameLoadingBar" class="game-loading-bar"></div>
+      </div>
+      <div class="game-loading-status">
+        <strong id="gameLoadingPercent">0%</strong>
+        <span id="gameLoadingText">准备资源</span>
+      </div>
+      <p id="gameLoadingDetail" class="game-loading-detail"></p>
+      <div class="game-loading-actions">
+        <button id="gameLoadingRetryBtn" type="button" hidden>重试加载</button>
+        <button id="gameLoadingContinueBtn" type="button" hidden>继续进入</button>
+        <button id="gameLoadingReturnBtn" type="button">返回大厅</button>
+      </div>
+    </div>
+  </section>
   <div class="app-shell">
     <main class="table-layout">
       <div class="board-column">
@@ -107,6 +126,6 @@
     </section>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/game.js?v=game-33" defer></script>
+  <script src="/game.js?v=game-34" defer></script>
 </body>
 </html>

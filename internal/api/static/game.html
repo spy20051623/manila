@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>马尼拉对局</title>
-  <link rel="stylesheet" href="/board.css?v=game-3" />
+  <link rel="stylesheet" href="/board.css?v=board-5" />
 </head>
 <body>
   <div class="app-shell">
@@ -17,6 +17,7 @@
               <button class="help-button" type="button" data-help="global" aria-label="查看全局帮助">?</button>
             </div>
             <div class="status-strip">
+              <div class="status-item status-countdown"><span>倒计时</span><strong id="timeoutText">--</strong></div>
               <div class="status-item status-id"><span>局号</span><strong id="gameIdText">-</strong></div>
               <div class="status-item status-number"><span>回合</span><strong id="roundText">-</strong></div>
               <div class="status-item status-phase"><span>阶段</span><strong id="phaseText">-</strong></div>
@@ -106,6 +107,6 @@
     </section>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/game.js?v=game-27" defer></script>
+  <script src="/game.js?v=game-33" defer></script>
 </body>
 </html>

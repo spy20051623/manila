@@ -17,8 +17,8 @@ import (
 
 const (
 	defaultRoomID       = "room-1"
-	operationTimeout    = 20 * time.Second
-	offlineSeatTimeout  = 20 * time.Second
+	operationTimeout    = 60 * time.Second
+	offlineSeatTimeout  = 60 * time.Second
 	maxAutomationSteps  = 300
 	maxPlayerNameRunes  = 12
 	roomCloseNoneActive = "整轮没有真人执行操作"
@@ -58,6 +58,7 @@ type roomState struct {
 	TimeoutPlayer        int
 	TimeoutEventSeq      int
 	TimeoutKind          string
+	TimeoutDeadline      time.Time
 	timeoutTimer         *time.Timer
 	closeTimer           *time.Timer
 	offlineTimers        map[string]*time.Timer
@@ -820,10 +821,10 @@ func (s *Service) processRoomAutomationStep(roomID string) (string, bool, bool, 
 			s.roomMu.Unlock()
 			return gameID, true, false, true
 		}
-		s.scheduleReviewTimeoutLocked(room, g)
+		timeoutChanged := s.scheduleReviewTimeoutLocked(room, g)
 		ref.Mu.Unlock()
 		s.roomMu.Unlock()
-		return gameID, changed, false, false
+		return gameID, changed || timeoutChanged, false, false
 	}
 	if g.RoundNumber > room.RoundNumber {
 		s.afterRoundAdvancedLocked(room, g)
@@ -861,10 +862,10 @@ func (s *Service) processRoomAutomationStep(roomID string) (string, bool, bool, 
 		s.roomMu.Unlock()
 		return gameID, true, false, true
 	}
-	s.scheduleHumanTimeoutLocked(room, g, current)
+	timeoutChanged := s.scheduleHumanTimeoutLocked(room, g, current)
 	ref.Mu.Unlock()
 	s.roomMu.Unlock()
-	return gameID, false, false, false
+	return gameID, timeoutChanged, false, false
 }
 
 func (s *Service) applyAIForHumanSeat(roomID string, playerID int, allowRoundTakeover bool) (*model.Game, model.Action, error) {
@@ -941,22 +942,20 @@ func (s *Service) activatePendingAILocked(room *roomState) {
 	room.PendingAI = map[int]bool{}
 }
 
-func (s *Service) scheduleHumanTimeoutLocked(room *roomState, g *model.Game, playerID int) {
+func (s *Service) scheduleHumanTimeoutLocked(room *roomState, g *model.Game, playerID int) bool {
 	if s.humanPlayerCountLocked(room) <= 1 {
-		s.stopTimeoutLocked(room)
-		return
+		return s.stopTimeoutLocked(room)
 	}
 	eventSeq := g.EventSeq
 	roomID := room.ID
-	s.scheduleTimeoutLocked(room, roomTimeoutAction, playerID, eventSeq, func() {
+	return s.scheduleTimeoutLocked(room, roomTimeoutAction, playerID, eventSeq, func() {
 		s.applyTimeoutAI(roomID, playerID, eventSeq)
 	})
 }
 
-func (s *Service) scheduleReviewTimeoutLocked(room *roomState, g *model.Game) {
+func (s *Service) scheduleReviewTimeoutLocked(room *roomState, g *model.Game) bool {
 	if s.humanPlayerCountLocked(room) <= 1 {
-		s.stopTimeoutLocked(room)
-		return
+		return s.stopTimeoutLocked(room)
 	}
 	hasUnconfirmed := false
 	for _, playerID := range model.PlayerOrder {
@@ -969,20 +968,20 @@ func (s *Service) scheduleReviewTimeoutLocked(room *roomState, g *model.Game) {
 	}
 	if !hasUnconfirmed {
 		if room.TimeoutKind == roomTimeoutReview {
-			s.stopTimeoutLocked(room)
+			return s.stopTimeoutLocked(room)
 		}
-		return
+		return false
 	}
 	roomID := room.ID
 	eventSeq := g.EventSeq
-	s.scheduleTimeoutLocked(room, roomTimeoutReview, 0, eventSeq, func() {
+	return s.scheduleTimeoutLocked(room, roomTimeoutReview, 0, eventSeq, func() {
 		s.applyReviewTimeout(roomID, eventSeq)
 	})
 }
 
-func (s *Service) scheduleTimeoutLocked(room *roomState, kind string, playerID int, eventSeq int, fn func()) {
+func (s *Service) scheduleTimeoutLocked(room *roomState, kind string, playerID int, eventSeq int, fn func()) bool {
 	if room.TimeoutKind == kind && room.TimeoutPlayer == playerID && room.TimeoutEventSeq == eventSeq {
-		return
+		return false
 	}
 	if room.timeoutTimer != nil {
 		room.timeoutTimer.Stop()
@@ -990,13 +989,16 @@ func (s *Service) scheduleTimeoutLocked(room *roomState, kind string, playerID i
 	room.TimeoutKind = kind
 	room.TimeoutPlayer = playerID
 	room.TimeoutEventSeq = eventSeq
+	room.TimeoutDeadline = time.Now().Add(operationTimeout)
 	room.timeoutTimer = time.AfterFunc(operationTimeout, fn)
+	return true
 }
 
-func (s *Service) stopTimeoutLocked(room *roomState) {
+func (s *Service) stopTimeoutLocked(room *roomState) bool {
 	if room == nil {
-		return
+		return false
 	}
+	changed := room.TimeoutKind != "" || room.TimeoutPlayer != 0 || room.TimeoutEventSeq != 0 || !room.TimeoutDeadline.IsZero()
 	if room.timeoutTimer != nil {
 		room.timeoutTimer.Stop()
 		room.timeoutTimer = nil
@@ -1004,6 +1006,8 @@ func (s *Service) stopTimeoutLocked(room *roomState) {
 	room.TimeoutKind = ""
 	room.TimeoutPlayer = 0
 	room.TimeoutEventSeq = 0
+	room.TimeoutDeadline = time.Time{}
+	return changed
 }
 
 func (s *Service) applyTimeoutAI(roomID string, playerID int, eventSeq int) {
@@ -1578,6 +1582,31 @@ func (s *Service) RoomContextForGame(gameID string, token string) (string, strin
 		return snapshot.RoomID, snapshot.Name, s.snapshotSeatsViewLocked(snapshot, token), nil
 	}
 	return "", "", nil, fmt.Errorf("room not found for game")
+}
+
+func (s *Service) RoomTimeoutForGame(gameID string) (model.RoomTimeoutView, bool) {
+	s.roomMu.Lock()
+	defer s.roomMu.Unlock()
+	room := s.roomForGameLocked(gameID)
+	if room == nil || room.Closed || room.TimeoutKind == "" || room.TimeoutDeadline.IsZero() {
+		return model.RoomTimeoutView{}, false
+	}
+	remaining := time.Until(room.TimeoutDeadline)
+	remainingSeconds := 0
+	remainingMillis := 0
+	if remaining > 0 {
+		remainingSeconds = int((remaining + time.Second - time.Nanosecond) / time.Second)
+		remainingMillis = int(remaining / time.Millisecond)
+	}
+	return model.RoomTimeoutView{
+		Kind:             room.TimeoutKind,
+		PlayerID:         room.TimeoutPlayer,
+		EventSeq:         room.TimeoutEventSeq,
+		DurationSeconds:  int(operationTimeout / time.Second),
+		RemainingSeconds: remainingSeconds,
+		RemainingMillis:  remainingMillis,
+		HumanPlayerCount: s.humanPlayerCountLocked(room),
+	}, true
 }
 
 func (s *Service) snapshotSeatsViewLocked(snapshot gameRoomSnapshot, token string) []model.RoomSeat {

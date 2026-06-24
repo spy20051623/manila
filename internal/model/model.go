@@ -310,6 +310,16 @@ type RoomView struct {
 	CompletedGames   []CompletedGameSummary `json:"completedGames,omitempty"`
 }
 
+type RoomTimeoutView struct {
+	Kind             string `json:"kind"`
+	PlayerID         int    `json:"playerId"`
+	EventSeq         int    `json:"eventSeq"`
+	DurationSeconds  int    `json:"durationSeconds"`
+	RemainingSeconds int    `json:"remainingSeconds"`
+	RemainingMillis  int    `json:"remainingMillis"`
+	HumanPlayerCount int    `json:"humanPlayerCount"`
+}
+
 type RoomSummary struct {
 	RoomID           string     `json:"roomId"`
 	Name             string     `json:"name"`

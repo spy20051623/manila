@@ -2,6 +2,7 @@ package app
 
 import (
 	"testing"
+	"time"
 
 	"manila/internal/model"
 	"manila/internal/rules"
@@ -263,6 +264,12 @@ func TestAllAISeatsDoNotStartRoomGame(t *testing.T) {
 }
 
 func TestReviewTimeoutConfirmsUnconfirmedHumans(t *testing.T) {
+	if operationTimeout != 60*time.Second {
+		t.Fatalf("operation timeout = %s, want 60s", operationTimeout)
+	}
+	if offlineSeatTimeout != 60*time.Second {
+		t.Fatalf("offline seat timeout = %s, want 60s", offlineSeatTimeout)
+	}
 	st := store.NewMemoryStore()
 	eng := rules.NewEngine()
 	svc := NewService(st, eng)
@@ -287,6 +294,10 @@ func TestReviewTimeoutConfirmsUnconfirmedHumans(t *testing.T) {
 	svc.scheduleReviewTimeoutLocked(&svc.room, g)
 	if svc.room.TimeoutKind != roomTimeoutReview {
 		t.Fatalf("expected review timeout to be scheduled, got %q", svc.room.TimeoutKind)
+	}
+	remaining := time.Until(svc.room.TimeoutDeadline)
+	if remaining <= 59*time.Second || remaining > 60*time.Second {
+		t.Fatalf("expected roughly 60s review timeout, got %s", remaining)
 	}
 	svc.stopTimeoutLocked(&svc.room)
 	svc.roomMu.Unlock()
@@ -316,6 +327,40 @@ func TestReviewTimeoutSkipsSingleHumanGame(t *testing.T) {
 		t.Fatalf("expected single-human review to have no timeout, got %q", svc.room.TimeoutKind)
 	}
 	svc.roomMu.Unlock()
+}
+
+func TestSchedulingHumanTimeoutBroadcastsGameChange(t *testing.T) {
+	st := store.NewMemoryStore()
+	eng := rules.NewEngine()
+	svc := NewService(st, eng)
+	g := rules.NewGame("game-1", 1)
+	if err := eng.StartGame(g); err != nil {
+		t.Fatal(err)
+	}
+	st.Put(g)
+
+	svc.roomMu.Lock()
+	svc.room.Status = model.RoomStatusInProgress
+	svc.room.ActiveGameID = "game-1"
+	svc.room.RoundNumber = g.RoundNumber
+	svc.room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Online: true}
+	svc.room.Participants["bob"] = &roomParticipant{Token: "bob", Name: "Bob", Online: true}
+	svc.room.Seats[1] = &roomSeat{Type: model.SeatTypeHuman, Token: "alice"}
+	svc.room.Seats[2] = &roomSeat{Type: model.SeatTypeHuman, Token: "bob"}
+	svc.room.Seats[3] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
+	svc.room.Seats[4] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
+	svc.roomMu.Unlock()
+
+	gameID, changed, roomChanged, continueLoop := svc.processRoomAutomationStep(defaultRoomID)
+	if gameID != "game-1" || !changed || roomChanged || continueLoop {
+		t.Fatalf("expected timeout scheduling to request game broadcast, got gameID=%q changed=%v roomChanged=%v continue=%v", gameID, changed, roomChanged, continueLoop)
+	}
+	svc.roomMu.Lock()
+	defer svc.roomMu.Unlock()
+	defer svc.stopTimeoutLocked(&svc.room)
+	if svc.room.TimeoutKind != roomTimeoutAction {
+		t.Fatalf("expected action timeout to be scheduled, got %q", svc.room.TimeoutKind)
+	}
 }
 
 func TestRoundReviewClearsTemporaryAITakeover(t *testing.T) {

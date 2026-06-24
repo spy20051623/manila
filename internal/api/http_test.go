@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +15,20 @@ import (
 	"manila/internal/rules"
 	"manila/internal/store"
 )
+
+func TestStaticCacheHeaders(t *testing.T) {
+	svc := app.NewService(store.NewMemoryStore(), rules.NewEngine())
+	h := NewHandler(svc)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	assertCacheHeader(t, mux, "/", "no-cache, must-revalidate")
+	assertCacheHeader(t, mux, "/game.html", "no-cache, must-revalidate")
+	assertCacheHeader(t, mux, "/assets/manila-board-base.png", "public, max-age=31536000, immutable")
+	assertCacheHeader(t, mux, "/game.js?v=game-test", "public, max-age=31536000, immutable")
+	assertCacheHeader(t, mux, "/board.css?v=board-test", "public, max-age=31536000, immutable")
+	assertCacheHeader(t, mux, "/app.js", "no-cache, must-revalidate")
+}
 
 func TestHTTPCreateStartAndActions(t *testing.T) {
 	svc := app.NewService(store.NewMemoryStore(), rules.NewEngine())
@@ -54,6 +69,22 @@ func TestHTTPCreateStartAndActions(t *testing.T) {
 	}
 	if len(actions["actions"].([]interface{})) == 0 {
 		t.Fatal("expected legal actions")
+	}
+}
+
+func assertCacheHeader(t *testing.T, mux *http.ServeMux, path string, expected string) {
+	t.Helper()
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	mux.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("GET %s status %d body %s", path, res.Code, res.Body.String())
+	}
+	if got := res.Header().Get("Cache-Control"); got != expected {
+		t.Fatalf("GET %s Cache-Control = %q, want %q", path, got, expected)
+	}
+	if strings.Contains(expected, "immutable") && !strings.Contains(res.Header().Get("Cache-Control"), "max-age=31536000") {
+		t.Fatalf("GET %s should be long cached, got %q", path, res.Header().Get("Cache-Control"))
 	}
 }
 
@@ -140,6 +171,9 @@ func TestRoomJoinSeatsStartAndObserverVisibility(t *testing.T) {
 	}
 	gameID := room["gameId"].(string)
 	ownState := roomRequest(t, mux, http.MethodGet, "/games/"+gameID+"/state", token, nil)
+	if _, ok := ownState["timeout"]; ok {
+		t.Fatalf("single-human game state should not include action timeout, got %s", ownState)
+	}
 	stateSeats := ownState["seats"].([]interface{})
 	if stateSeats[0].(map[string]interface{})["name"] != "Alice" {
 		t.Fatalf("game state should include room seat names, got %s", ownState)
@@ -195,6 +229,52 @@ func TestRoomJoinSeatsStartAndObserverVisibility(t *testing.T) {
 	if renamedSeats[0].(map[string]interface{})["name"] != "Carol" {
 		t.Fatalf("ended game state should resolve current participant names by token, got %s", renamedState)
 	}
+}
+
+func TestMultiplayerGameStateIncludesTimeoutCountdown(t *testing.T) {
+	svc := app.NewService(store.NewMemoryStore(), rules.NewEngine())
+	h := NewHandler(svc)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	alice := roomJoinNamed(t, mux, "Alice")
+	bob := roomJoinNamed(t, mux, "Bob")
+	roomRequest(t, mux, http.MethodPost, "/room/seats/1/claim", alice, nil)
+	roomRequest(t, mux, http.MethodPost, "/room/seats/2/claim", bob, nil)
+	roomRequest(t, mux, http.MethodPost, "/room/seats/3/ai", alice, nil)
+	roomRequest(t, mux, http.MethodPost, "/room/seats/4/ai", alice, nil)
+	roomRequest(t, mux, http.MethodPost, "/room/ready", alice, nil)
+	started := roomRequest(t, mux, http.MethodPost, "/room/ready", bob, nil)
+	gameID := started["room"].(map[string]interface{})["gameId"].(string)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		state := roomRequest(t, mux, http.MethodGet, "/games/"+gameID+"/state", alice, nil)
+		timeoutPayload, ok := state["timeout"].(map[string]interface{})
+		if !ok {
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		if timeoutPayload["kind"] != "action" {
+			t.Fatalf("timeout kind = %v, want action in %s", timeoutPayload["kind"], state)
+		}
+		if got := int(timeoutPayload["durationSeconds"].(float64)); got != 60 {
+			t.Fatalf("durationSeconds = %d, want 60 in %s", got, state)
+		}
+		remaining := int(timeoutPayload["remainingSeconds"].(float64))
+		if remaining <= 0 || remaining > 60 {
+			t.Fatalf("remainingSeconds = %d, want 1..60 in %s", remaining, state)
+		}
+		remainingMillis := int(timeoutPayload["remainingMillis"].(float64))
+		if remainingMillis <= 0 || remainingMillis > 60000 {
+			t.Fatalf("remainingMillis = %d, want 1..60000 in %s", remainingMillis, state)
+		}
+		if got := int(timeoutPayload["humanPlayerCount"].(float64)); got != 2 {
+			t.Fatalf("humanPlayerCount = %d, want 2 in %s", got, state)
+		}
+		return
+	}
+	t.Fatalf("expected timeout countdown in multiplayer game state")
 }
 
 func TestGameActionEndpointTriggersRoomAutomation(t *testing.T) {

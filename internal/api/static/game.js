@@ -12,6 +12,10 @@ let selectedGoods = new Set();
 let shipStarts = {};
 let navigatorMoves = {};
 let toastTimer = null;
+let countdownTimer = null;
+let countdownExpiryRefreshTimer = null;
+let gameStatePollTimer = null;
+let gameStatePollInFlight = false;
 let localPlayerId = 0;
 let settlementOverlayClosed = false;
 let actionEventSeq = null;
@@ -36,6 +40,8 @@ let initialRoomLoaded = false;
 const DEBUG_SHOW_ALL_HOTSPOTS = false;
 const DESIGN_VIEWPORT = { width: 1432, height: 828 };
 const BOARD_ANIMATION_DURATION_MS = 1500;
+const GAME_STATE_POLL_VISIBLE_MULTIPLAYER_MS = 1000;
+const GAME_STATE_POLL_IDLE_MS = 5000;
 const HELP_CONTENT = {
   global: {
     title: "全局",
@@ -261,6 +267,7 @@ async function refresh(options = {}) {
   localPlayerId = Number(data.playerId || 0);
   await applyRoomPayload(roomFromGamePayload(data), { animate: false });
   initialRoomLoaded = true;
+  syncGameStatePolling();
   if (state?.status === "ended") {
     lockFinishedGame();
     return;
@@ -277,6 +284,7 @@ function roomFromGamePayload(data) {
     roomId,
     name: data?.roomName || room?.name || "",
     seats: Array.isArray(data?.seats) ? data.seats : (Array.isArray(room?.seats) ? room.seats : []),
+    timeout: normalizeTimeout(data?.timeout || null),
     status: game ? "inProgress" : "waiting",
     gameId: game?.gameId || gameId,
     game,
@@ -286,11 +294,20 @@ function roomFromGamePayload(data) {
   };
 }
 
+function normalizeTimeout(timeout) {
+  if (!timeout) return null;
+  return {
+    ...timeout,
+    receivedAtMs: Date.now(),
+  };
+}
+
 function lockFinishedGame() {
   actions = [];
   actionInputLocked = true;
   pendingSubmittedAction = null;
   hideBoardActionTargets();
+  stopGameStatePolling();
   if (gameSocket) {
     gameSocket.onclose = null;
     gameSocket.close();
@@ -305,6 +322,8 @@ async function applyRoomPayload(nextRoom, options = {}) {
   const nextEvents = eventRecordsFromGame(nextRoom?.game || null);
   if (isDuplicateInGamePayload(nextRoom)) {
     if (animate) {
+      room = { ...(room || {}), ...(nextRoom || {}) };
+      syncCountdownTimer();
       if (eventsArePrefix(nextEvents, currentEventRecords)) {
         if (nextEvents.length === currentEventRecords.length) {
           rememberDeferredRenderRoom(nextRoom, false);
@@ -1583,6 +1602,63 @@ function connectGameSocket() {
   };
 }
 
+function shouldPollGameState() {
+  return Boolean(gameId && room?.status === "inProgress" && state && state.status !== "ended");
+}
+
+function gameStatePollDelay() {
+  if (!shouldPollGameState()) return 0;
+  if (document.hidden) return GAME_STATE_POLL_IDLE_MS;
+  return humanPlayerCountForCountdown() > 1 ? GAME_STATE_POLL_VISIBLE_MULTIPLAYER_MS : GAME_STATE_POLL_IDLE_MS;
+}
+
+function syncGameStatePolling() {
+  stopGameStatePolling();
+  const delay = gameStatePollDelay();
+  if (delay <= 0) return;
+  gameStatePollTimer = setTimeout(() => {
+    runGameStatePoll().catch(() => {});
+  }, delay);
+}
+
+function stopGameStatePolling() {
+  if (gameStatePollTimer === null) return;
+  clearTimeout(gameStatePollTimer);
+  gameStatePollTimer = null;
+}
+
+async function runGameStatePoll() {
+  stopGameStatePolling();
+  if (!shouldPollGameState()) return;
+  if (gameStatePollInFlight) {
+    syncGameStatePolling();
+    return;
+  }
+  gameStatePollInFlight = true;
+  try {
+    await pollGameStateOnce();
+  } catch (err) {
+    if (isMissingGameError(err)) {
+      returnToLobby({ keepRoom: false });
+      return;
+    }
+  } finally {
+    gameStatePollInFlight = false;
+  }
+  syncGameStatePolling();
+}
+
+async function pollGameStateOnce() {
+  const data = await api(`/games/${encodeURIComponent(gameId)}/state`);
+  if (data.playerId !== undefined) localPlayerId = Number(data.playerId || 0);
+  if (!initialRoomLoaded) return;
+  enqueueWSPayload(roomFromGamePayload(data));
+}
+
+function isMissingGameError(err) {
+  return /not found|room not found|game not found/i.test(err?.message || String(err || ""));
+}
+
 function renderRoom() {
   const app = document.querySelector(".app-shell");
   const inGame = room && state && room.status === "inProgress";
@@ -1666,6 +1742,81 @@ function isLocalActionWindowForGame(game) {
   return expectedActorIdForGame(game) === localPlayerId;
 }
 
+function ensureGlobalCountdownItem() {
+  if ($("timeoutText")) return;
+  const strip = document.querySelector(".status-strip");
+  if (!strip) return;
+  const item = document.createElement("div");
+  item.className = "status-item status-countdown";
+  item.innerHTML = `<span>倒计时</span><strong id="timeoutText">--</strong>`;
+  strip.appendChild(item);
+}
+
+function humanPlayerCountForCountdown() {
+  if (room?.timeout?.humanPlayerCount !== undefined) {
+    return Number(room.timeout.humanPlayerCount || 0);
+  }
+  return (room?.seats || []).filter((seat) => seat.type === "human").length;
+}
+
+function countdownRemainingMillis() {
+  if (!state || state.status === "ended") return null;
+  if (humanPlayerCountForCountdown() <= 1) return null;
+  const timeout = room?.timeout;
+  if (!timeout) return null;
+  const baseRemainingMs = timeout.remainingMillis !== undefined
+    ? Number(timeout.remainingMillis || 0)
+    : Number(timeout.remainingSeconds || 0) * 1000;
+  const elapsedMs = Date.now() - Number(timeout.receivedAtMs || Date.now());
+  return Math.max(0, baseRemainingMs - elapsedMs);
+}
+
+function updateCountdownText() {
+  ensureGlobalCountdownItem();
+  const el = $("timeoutText");
+  if (!el) return;
+  const remainingMs = countdownRemainingMillis();
+  if (remainingMs === null) {
+    el.textContent = "--";
+    return;
+  }
+  if (remainingMs <= 0) {
+    el.textContent = "--";
+    if (countdownTimer !== null) {
+      clearInterval(countdownTimer);
+      countdownTimer = null;
+    }
+    scheduleCountdownExpiryRefresh();
+    return;
+  }
+  el.textContent = `${Math.ceil(remainingMs / 1000)}s`;
+}
+
+function syncCountdownTimer() {
+  const remainingMs = countdownRemainingMillis();
+  const shouldTick = remainingMs !== null && remainingMs > 0;
+  if (!shouldTick) {
+    if (countdownTimer !== null) {
+      clearInterval(countdownTimer);
+      countdownTimer = null;
+    }
+    updateCountdownText();
+    return;
+  }
+  if (countdownTimer === null) {
+    countdownTimer = setInterval(updateCountdownText, 250);
+  }
+  updateCountdownText();
+}
+
+function scheduleCountdownExpiryRefresh() {
+  if (!gameId || countdownExpiryRefreshTimer !== null) return;
+  countdownExpiryRefreshTimer = setTimeout(() => {
+    countdownExpiryRefreshTimer = null;
+    runGameStatePoll().catch(() => {});
+  }, 350);
+}
+
 function expectedActorIdForPhase() {
   return expectedActorIdForGame(state);
 }
@@ -1724,21 +1875,75 @@ async function submitAction(action, payloadOverride) {
     return;
   }
   const payload = payloadOverride === undefined ? normalizePayload(action.payload || {}) : payloadOverride;
-  const requestBody = {
+  const initialRequestBody = {
     playerId: localPlayerId,
     type: action.type,
     payload,
     expectedEventSeq: actionEventSeq ?? state.eventSeq,
   };
-  lockLocalActions(requestBody);
+  lockLocalActions(initialRequestBody);
   try {
-    await api(`/games/${encodeURIComponent(gameId)}/actions`, { method: "POST", body: JSON.stringify(requestBody) });
+    const requestBody = await prepareFreshActionRequest(action, payload, payloadOverride !== undefined);
+    pendingSubmittedAction = requestBody;
+    await postActionWithSequenceRetry(action, requestBody, payloadOverride !== undefined);
     resetTransientControls();
   } catch (err) {
     unlockLocalActions();
     await loadLegalActions().then(renderPostActionControls).catch(() => {});
     throw err;
   }
+}
+
+async function prepareFreshActionRequest(action, payload, hasPayloadOverride) {
+  const data = await api(`/games/${encodeURIComponent(gameId)}/actions`);
+  const freshActions = data.actions || [];
+  if (data.playerId !== undefined) localPlayerId = Number(data.playerId || 0);
+  actionEventSeq = data.eventSeq ?? state?.eventSeq ?? actionEventSeq;
+  actions = freshActions;
+  const freshAction = equivalentActionForSubmit(action, hasPayloadOverride);
+  if (!freshAction) {
+    throw new Error("局面已更新，请重新选择行动。");
+  }
+  validateFreshActionPayload(freshAction, payload, hasPayloadOverride);
+  return {
+    playerId: getLocalPlayerId(),
+    type: freshAction.type,
+    payload,
+    expectedEventSeq: actionEventSeq,
+  };
+}
+
+async function postActionWithSequenceRetry(originalAction, requestBody, hasPayloadOverride) {
+  try {
+    await api(`/games/${encodeURIComponent(gameId)}/actions`, { method: "POST", body: JSON.stringify(requestBody) });
+  } catch (err) {
+    if (!isEventSequenceMismatch(err)) throw err;
+    const retryBody = await prepareFreshActionRequest(originalAction, requestBody.payload, hasPayloadOverride);
+    pendingSubmittedAction = retryBody;
+    await api(`/games/${encodeURIComponent(gameId)}/actions`, { method: "POST", body: JSON.stringify(retryBody) });
+  }
+}
+
+function equivalentActionForSubmit(action, hasPayloadOverride) {
+  if (hasPayloadOverride) {
+    return actions.find((candidate) => candidate.type === action.type);
+  }
+  const key = actionKeyFor(action);
+  return actions.find((candidate) => actionKeyFor(candidate) === key);
+}
+
+function validateFreshActionPayload(action, payload, hasPayloadOverride) {
+  if (!hasPayloadOverride || action.type !== "Bid") return;
+  const min = Number(action.payload?.minBid || 1);
+  const max = Number(action.payload?.maxBid || min);
+  const amount = Number(payload?.amount || 0);
+  if (!Number.isInteger(amount) || amount < min || amount > max) {
+    throw new Error(`局面已更新，当前可出价范围为 ${min}-${max}。`);
+  }
+}
+
+function isEventSequenceMismatch(err) {
+  return /event sequence mismatch/i.test(err?.message || String(err || ""));
 }
 
 async function aiStep() {
@@ -1786,15 +1991,17 @@ async function aiAdvanceRound() {
 }
 
 function render() {
+  ensureGlobalCountdownItem();
   if (!state) {
     renderEmpty();
     return;
   }
-  $("gameIdText").textContent = state.gameId || "-";
-  $("roundText").textContent = state.roundNumber || "-";
-  $("phaseText").textContent = phaseName(state);
-  $("currentPlayerText").textContent = state.currentPlayer ? `P${state.currentPlayer}` : "-";
-  $("harborMasterText").textContent = state.harborMaster ? `P${state.harborMaster}` : "-";
+  $("gameIdText").textContent = state.gameId || "--";
+  $("roundText").textContent = state.roundNumber || "--";
+  $("phaseText").textContent = phaseName(state) || "--";
+  $("currentPlayerText").textContent = state.currentPlayer ? `P${state.currentPlayer}` : "--";
+  $("harborMasterText").textContent = state.harborMaster ? `P${state.harborMaster}` : "--";
+  syncCountdownTimer();
 
   renderRouteNumbers();
   renderGoodsMarket();
@@ -1812,10 +2019,12 @@ function render() {
 }
 
 function renderEmpty() {
+  ensureGlobalCountdownItem();
   actionEventSeq = null;
-  for (const id of ["gameIdText", "roundText", "phaseText", "currentPlayerText", "harborMasterText"]) {
-    $(id).textContent = "-";
+  for (const id of ["gameIdText", "roundText", "phaseText", "currentPlayerText", "harborMasterText", "timeoutText"]) {
+    $(id).textContent = "--";
   }
+  syncCountdownTimer();
   $("goodsMarket").innerHTML = "";
   $("portSlots").innerHTML = "";
   $("dockSlots").innerHTML = "";
@@ -3073,6 +3282,7 @@ document.addEventListener("click", (event) => {
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") closeHelp();
 });
+document.addEventListener("visibilitychange", syncGameStatePolling);
 
 syncAnimationToggleButton();
 refresh().then(() => {

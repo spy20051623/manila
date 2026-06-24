@@ -73,10 +73,10 @@ func (h *Handler) Register(mux *http.ServeMux) {
 
 func staticFileServer() http.Handler {
 	if _, err := os.Stat("internal/api/static"); err == nil {
-		return noCache(remapStaticPages(http.FileServer(http.Dir("internal/api/static"))))
+		return cacheStatic(remapStaticPages(http.FileServer(http.Dir("internal/api/static"))))
 	}
 	static, _ := fs.Sub(staticFiles, "static")
-	return noCache(remapStaticPages(http.FileServer(http.FS(static))))
+	return cacheStatic(remapStaticPages(http.FileServer(http.FS(static))))
 }
 
 func remapStaticPages(next http.Handler) http.Handler {
@@ -98,11 +98,32 @@ func requestWithPath(r *http.Request, path string) *http.Request {
 	return cloned
 }
 
-func noCache(next http.Handler) http.Handler {
+func cacheStatic(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Cache-Control", cacheControlForStaticRequest(r))
 		next.ServeHTTP(w, r)
 	})
+}
+
+func cacheControlForStaticRequest(r *http.Request) string {
+	path := r.URL.Path
+	switch path {
+	case "/", "/debug", "/debug/", "/debug.html", "/game", "/game/", "/game.html":
+		return "no-cache, must-revalidate"
+	}
+	if strings.HasSuffix(path, ".html") {
+		return "no-cache, must-revalidate"
+	}
+	if strings.HasPrefix(path, "/assets/") {
+		return "public, max-age=31536000, immutable"
+	}
+	if strings.HasSuffix(path, ".js") || strings.HasSuffix(path, ".css") {
+		if r.URL.Query().Has("v") {
+			return "public, max-age=31536000, immutable"
+		}
+		return "no-cache, must-revalidate"
+	}
+	return "no-cache, must-revalidate"
 }
 
 func (h *Handler) handleGames(w http.ResponseWriter, r *http.Request) {
@@ -921,6 +942,9 @@ func (h *Handler) addRoomContextToGamePayload(payload map[string]interface{}, ga
 	payload["roomId"] = roomID
 	payload["roomName"] = roomName
 	payload["seats"] = seats
+	if timeout, ok := h.service.RoomTimeoutForGame(gameID); ok {
+		payload["timeout"] = timeout
+	}
 }
 
 func (h *Handler) gameVisibleForToken(gameID string, token string, g *model.Game) *model.Game {

@@ -20,9 +20,12 @@ let animationsEnabled = localStorage.getItem("manilaAnimationsEnabled") !== "fal
 let animationSnapshot = null;
 let animationGameId = "";
 let currentEventRecords = [];
+let shipEventSnapshotTimeline = [];
 let deferredRenderRoom = null;
+let deferredRenderAllowed = false;
 let deferredRenderApplying = false;
 let playedAnimationGameId = "";
+let forceAnimationBaseRender = false;
 const playedAnimationEvents = new Set();
 const activeAnimations = new Map();
 const animationQueues = new Map();
@@ -229,7 +232,7 @@ function clearRoomToken() {
 }
 
 function returnToLobby() {
-  clearActiveAnimations(true);
+  clearActiveAnimations(false);
   if (gameSocket) {
     gameSocket.onclose = null;
     gameSocket.close();
@@ -250,7 +253,7 @@ async function refresh(options = {}) {
     returnToLobby();
     return;
   }
-  clearActiveAnimations(true);
+  clearActiveAnimations(false);
   wsPayloadQueue.length = 0;
   localPlayerId = Number(data.playerId || 0);
   await applyRoomPayload(roomFromGamePayload(data), { animate: false });
@@ -296,12 +299,12 @@ async function applyRoomPayload(nextRoom, options = {}) {
     if (animate) {
       if (eventsArePrefix(nextEvents, currentEventRecords)) {
         if (nextEvents.length === currentEventRecords.length) {
-          deferredRenderRoom = nextRoom || deferredRenderRoom;
-          if (!hasActiveOrQueuedAnimations()) scheduleDeferredRenderFlush();
+          rememberDeferredRenderRoom(nextRoom, false);
         }
       } else {
-        deferredRenderRoom = null;
-        clearActiveAnimations(true);
+        clearDeferredRenderRoom();
+        clearActiveAnimations(false);
+        await applyRoomPayload(nextRoom, { animate: false });
         console.info("已重绘");
       }
       syncAnimationToggleButton();
@@ -321,6 +324,7 @@ async function applyRoomPayload(nextRoom, options = {}) {
     syncTransientControls();
     renderRoom();
     animationSnapshot = captureAnimationSnapshot();
+    rebuildShipEventSnapshotTimeline(currentEventRecords, animationSnapshot);
     syncAnimationToggleButton();
     setBusyButtons(false);
     return;
@@ -336,8 +340,7 @@ async function applyRoomPayload(nextRoom, options = {}) {
     && eventsArePrefix(nextEvents, previousEvents);
   if (incomingAlreadySeen) {
     if (nextEvents.length === previousEvents.length) {
-      deferredRenderRoom = nextRoom || deferredRenderRoom;
-      if (!hasActiveOrQueuedAnimations()) scheduleDeferredRenderFlush();
+      rememberDeferredRenderRoom(nextRoom, false);
     }
     syncAnimationToggleButton();
     setBusyButtons(false);
@@ -351,14 +354,16 @@ async function applyRoomPayload(nextRoom, options = {}) {
     && eventsArePrefix(previousEvents, nextEvents);
   if (canAnimateIncrementally) {
     if (leftRoundReviewTransition(previousSnapshot, nextSnapshot)) {
-      deferredRenderRoom = null;
-      clearActiveAnimations(true);
+      clearDeferredRenderRoom();
+      clearActiveAnimations(false);
       await applyRoomPayload(nextRoom, { animate: false });
       return;
     }
-    deferredRenderRoom = nextRoom || null;
-    await enqueueNewEventAnimations(previousEvents, nextEvents, previousSnapshot, nextSnapshot);
-    animationSnapshot = nextSnapshot;
+    rememberDeferredRenderRoom(
+      nextRoom,
+      shouldRedrawAfterIncrementalUpdate(previousSnapshot, nextSnapshot, previousEvents, nextEvents),
+    );
+    animationSnapshot = await enqueueNewEventAnimations(previousEvents, nextEvents, previousSnapshot, nextSnapshot) || nextSnapshot;
     currentEventRecords = nextEvents;
     if (nextSnapshot.game?.status === "ended") {
       actions = [];
@@ -366,7 +371,7 @@ async function applyRoomPayload(nextRoom, options = {}) {
       hideBoardActionTargets();
     }
     setBusyButtons(false);
-    if (!hasActiveOrQueuedAnimations()) scheduleDeferredRenderFlush();
+    if (deferredRenderAllowed && !hasActiveOrQueuedAnimations()) scheduleDeferredRenderFlush();
     return;
   }
   const canBootstrapAnimations = animate
@@ -375,18 +380,16 @@ async function applyRoomPayload(nextRoom, options = {}) {
     && nextRoom?.status === "inProgress"
     && nextEvents.length > 0;
   if (canBootstrapAnimations) {
-    deferredRenderRoom = nextRoom || null;
+    rememberDeferredRenderRoom(nextRoom, false);
     const initialSnapshot = createInitialAnimationSnapshot(nextSnapshot);
-    await enqueueNewEventAnimations([], nextEvents, initialSnapshot, nextSnapshot);
-    animationSnapshot = nextSnapshot;
+    animationSnapshot = await enqueueNewEventAnimations([], nextEvents, initialSnapshot, nextSnapshot) || nextSnapshot;
     currentEventRecords = nextEvents;
     setBusyButtons(false);
-    if (!hasActiveOrQueuedAnimations()) scheduleDeferredRenderFlush();
     return;
   }
   if (animate) {
-    deferredRenderRoom = null;
-    clearActiveAnimations(true);
+    clearDeferredRenderRoom();
+    clearActiveAnimations(false);
     if (eventRecordsMismatch) console.info("已重绘");
   }
   room = nextRoom || null;
@@ -408,6 +411,7 @@ async function applyRoomPayload(nextRoom, options = {}) {
   renderRoom();
   animationSnapshot = captureAnimationSnapshot();
   currentEventRecords = nextEvents;
+  rebuildShipEventSnapshotTimeline(currentEventRecords, animationSnapshot);
   if (state?.status === "ended") {
     lockFinishedGame();
     return;
@@ -468,12 +472,31 @@ function leftRoundReviewTransition(previousSnapshot, nextSnapshot) {
     && nextSnapshot.phase !== "RoundReview";
 }
 
+function rememberDeferredRenderRoom(nextRoom, allowRender) {
+  if (!nextRoom) return;
+  deferredRenderRoom = nextRoom;
+  deferredRenderAllowed = Boolean(deferredRenderAllowed || allowRender);
+}
+
+function clearDeferredRenderRoom() {
+  deferredRenderRoom = null;
+  deferredRenderAllowed = false;
+}
+
+function shouldRedrawAfterIncrementalUpdate(previousSnapshot, nextSnapshot, previousEvents, nextEvents) {
+  if (!previousSnapshot || !nextSnapshot) return false;
+  if (nextSnapshot.game?.status === "ended") return true;
+  if (pendingSubmittedAction && Number(nextSnapshot.eventSeq || 0) > Number(pendingSubmittedAction.expectedEventSeq || 0)) return true;
+  if (!isLocalActionWindowForGame(previousSnapshot.game) && isLocalActionWindowForGame(nextSnapshot.game)) return true;
+  return false;
+}
+
 async function enqueueNewEventAnimations(previousEvents, nextEvents, previousSnapshot, nextSnapshot) {
   syncAnimationToggleButton();
   if (!nextSnapshot) {
     clearActiveAnimations(true);
     animationGameId = "";
-    return;
+    return null;
   }
   if (nextSnapshot.gameId !== animationGameId) {
     if (animationGameId) {
@@ -487,26 +510,38 @@ async function enqueueNewEventAnimations(previousEvents, nextEvents, previousSna
   if (nextSnapshot.gameId !== playedAnimationGameId) resetPlayedAnimationEvents(nextSnapshot.gameId);
   if (leftRoundReviewTransition(previousSnapshot, nextSnapshot)) clearActiveAnimations(true);
   if (!previousSnapshot || previousSnapshot.gameId !== nextSnapshot.gameId) {
-    return;
+    return null;
   }
   const newEvents = nextEvents.slice(previousEvents.length);
   const eventSnapshot = cloneAnimationSnapshot(previousSnapshot);
   for (const event of newEvents) {
     const key = animationEventKey(event);
-    if (playedAnimationEvents.has(key)) continue;
-    playedAnimationEvents.add(key);
-    const result = playEventAnimation(event, eventSnapshot, nextSnapshot);
+    const alreadyPlayed = playedAnimationEvents.has(key);
+    if (!alreadyPlayed) playedAnimationEvents.add(key);
+    const result = playEventAnimation(event, eventSnapshot, nextSnapshot, { animate: !alreadyPlayed });
     if (result?.waitForPaint) await waitForNextPaint();
+    recordShipEventSnapshot(event, eventSnapshot);
   }
+  eventSnapshot.phase = nextSnapshot.phase;
+  eventSnapshot.roundNumber = nextSnapshot.roundNumber;
+  eventSnapshot.eventSeq = nextSnapshot.eventSeq;
+  eventSnapshot.events = nextSnapshot.events;
+  eventSnapshot.game = nextSnapshot.game;
+  return eventSnapshot;
 }
 
 function resetPlayedAnimationEvents(nextGameId) {
   playedAnimationGameId = nextGameId || "";
   playedAnimationEvents.clear();
+  resetShipEventSnapshotTimeline();
 }
 
 function animationEventKey(event) {
   return `${Number(event?.seq || 0)}:${String(event?.type || "")}`;
+}
+
+function resetShipEventSnapshotTimeline() {
+  shipEventSnapshotTimeline = [];
 }
 
 function createInitialAnimationSnapshot(nextSnapshot) {
@@ -529,13 +564,39 @@ function createInitialAnimationSnapshot(nextSnapshot) {
 
 function renderAnimationBaseFromGame(sourceGame) {
   if (!sourceGame) return;
-  room = { ...(deferredRenderRoom || room || {}), status: "inProgress", game: sourceGame };
-  state = sourceGame;
-  gameId = sourceGame.gameId || room?.gameId || "";
-  actions = [];
-  actionEventSeq = sourceGame.eventSeq ?? null;
-  syncTransientControls();
-  renderRoom();
+  const liveRoom = room;
+  const liveState = state;
+  const liveGameId = gameId;
+  const liveActions = actions;
+  const liveActionEventSeq = actionEventSeq;
+  const liveForceRender = forceAnimationBaseRender;
+  try {
+    forceAnimationBaseRender = true;
+    room = { ...(deferredRenderRoom || room || {}), status: "inProgress", game: sourceGame };
+    state = sourceGame;
+    gameId = sourceGame.gameId || room?.gameId || "";
+    actions = [];
+    actionEventSeq = sourceGame.eventSeq ?? null;
+    syncTransientControls();
+    renderRoom();
+  } finally {
+    forceAnimationBaseRender = liveForceRender;
+    room = liveRoom;
+    state = liveState;
+    gameId = liveGameId;
+    actions = liveActions;
+    actionEventSeq = liveActionEventSeq;
+    syncTransientControls();
+  }
+}
+
+function enqueueAnimationBaseRender(sourceGame) {
+  if (!sourceGame) return;
+  queueAnimation("ship:group", (done) => {
+    renderAnimationBaseFromGame(sourceGame);
+    waitForNextPaint().then(done).catch(() => done());
+    return null;
+  });
 }
 
 function waitForNextPaint() {
@@ -637,6 +698,76 @@ function cloneAnimationSnapshot(snapshot) {
   return { ...snapshot, ships, game: snapshot.game || null };
 }
 
+function cloneShipFrame(ships) {
+  const frame = {};
+  for (const [shipId, ship] of Object.entries(ships || {})) {
+    frame[shipId] = {
+      position: Number(ship?.position ?? -1),
+      status: ship?.status || "",
+      routeIndex: Number(ship?.routeIndex || 1),
+    };
+  }
+  return frame;
+}
+
+function recordShipEventSnapshot(event, snapshot) {
+  if (!event || !snapshot) return;
+  shipEventSnapshotTimeline.push({
+    seq: Number(event.seq || 0),
+    type: String(event.type || ""),
+    ships: shipPositionsOnly(snapshot.ships || {}),
+  });
+  if (shipEventSnapshotTimeline.length > 1000) {
+    shipEventSnapshotTimeline.splice(0, shipEventSnapshotTimeline.length - 1000);
+  }
+}
+
+function shipPositionsOnly(ships) {
+  const positions = {};
+  for (const [shipId, ship] of Object.entries(ships || {})) {
+    positions[shipId] = Number(ship?.position ?? -1);
+  }
+  return positions;
+}
+
+function rebuildShipEventSnapshotTimeline(events, finalSnapshot) {
+  resetShipEventSnapshotTimeline();
+  if (!finalSnapshot || !Array.isArray(events) || events.length === 0) return;
+  const snapshot = createInitialAnimationSnapshot(finalSnapshot);
+  for (const event of events) {
+    applyEventToShipSnapshot(event, snapshot, finalSnapshot);
+    recordShipEventSnapshot(event, snapshot);
+  }
+}
+
+function applyEventToShipSnapshot(event, snapshot, nextSnapshot) {
+  if (!event || !snapshot) return;
+  if (event.type === "GoodsSelected") {
+    const baseGame = buildGoodsSelectedBaseGame(event.data || {}, nextSnapshot?.game || snapshot.game || null, event);
+    updateAnimationSnapshotFromGame(snapshot, baseGame);
+    return;
+  }
+  if (event.type === "ShipStartsSet") {
+    applyShipStartsToSnapshot(event.data?.starts || {}, snapshot, nextSnapshot);
+    return;
+  }
+  if (event.type === "DiceRolled") {
+    applyDiceToSnapshot(event.data?.results || {}, snapshot);
+    return;
+  }
+  if (event.type === "NavigatorMoved") {
+    applyNavigatorToSnapshot(event.data?.moves || [], snapshot);
+    return;
+  }
+  if (event.type === "RoundStarted") {
+    clearShipPositionSnapshot(snapshot);
+    return;
+  }
+  if (event.type === "ShipArrived" || event.type === "ShipDocked") {
+    applyShipStatusToSnapshot(event.data?.shipId, event.type, snapshot, { queue: false });
+  }
+}
+
 function captureAnimationSnapshot() {
   return captureAnimationSnapshotFromRoom(room);
 }
@@ -669,17 +800,71 @@ function captureAnimationSnapshotFromRoom(sourceRoom) {
   };
 }
 
-function playEventAnimation(event, previousSnapshot, nextSnapshot) {
+function applyShipStartsToSnapshot(starts, snapshot, nextSnapshot) {
+  if (!snapshot) return;
+  const selected = selectedShipIdsForGame(snapshot.game || nextSnapshot?.game || null);
+  for (const shipId of selected) {
+    const current = snapshot.ships?.[shipId] || snapshot.ships?.[String(shipId)] || shipSnapshotFromFinal(shipId, nextSnapshot);
+    if (!current) continue;
+    const start = Number(starts?.[shipId] ?? starts?.[String(shipId)] ?? current.position ?? 0);
+    snapshot.ships[shipId] = shipSnapshotWithPosition(current, start);
+  }
+}
+
+function applyDiceToSnapshot(results, snapshot) {
+  if (!snapshot) return;
+  for (const [shipId, roll] of Object.entries(results || {})) {
+    applyShipDeltaToSnapshot(shipId, Number(roll || 0), snapshot);
+  }
+}
+
+function applyNavigatorToSnapshot(moves, snapshot) {
+  if (!snapshot) return;
+  for (const move of moves || []) {
+    applyShipDeltaToSnapshot(move?.shipId, Number(move?.delta || 0), snapshot);
+  }
+}
+
+function applyShipDeltaToSnapshot(shipId, delta, snapshot) {
+  const id = Number(shipId);
+  const ship = snapshot?.ships?.[id] || snapshot?.ships?.[String(id)];
+  if (!ship || Number(ship.position) < 0) return;
+  snapshot.ships[id] = shipSnapshotWithPosition(ship, Math.max(0, Number(ship.position || 0) + Number(delta || 0)));
+}
+
+function shipSnapshotFromFinal(shipId, nextSnapshot) {
+  const id = Number(shipId);
+  const ship = nextSnapshot?.ships?.[id] || nextSnapshot?.ships?.[String(id)];
+  return ship ? { ...ship, point: ship.point ? { ...ship.point } : null } : null;
+}
+
+function shipSnapshotWithPosition(ship, position) {
+  const next = {
+    ...ship,
+    position: Number(position || 0),
+  };
+  next.point = shipPointForSnapshotShip(next);
+  return next;
+}
+
+function playEventAnimation(event, previousSnapshot, nextSnapshot, options = {}) {
   if (!event || !event.type) return;
+  const animate = options.animate !== false;
+  const beforeShips = cloneShipFrame(previousSnapshot?.ships || {});
   if (event.type === "GoodsSelected") {
     const baseGame = buildGoodsSelectedBaseGame(event.data || {}, nextSnapshot?.game || null, event);
     if (!baseGame) return;
-    renderAnimationBaseFromGame(baseGame);
+    if (animate) enqueueAnimationBaseRender(baseGame);
     updateAnimationSnapshotFromGame(previousSnapshot, baseGame);
-    return { waitForPaint: true };
+    return;
   }
   if (event.type === "ShipStartsSet") {
-    playShipStartsAnimation(event.data?.starts || {}, previousSnapshot, nextSnapshot);
+    applyShipStartsToSnapshot(event.data?.starts || {}, previousSnapshot, nextSnapshot);
+    if (animate) playShipStartsAnimation(event.data?.starts || {}, beforeShips, previousSnapshot?.ships || {});
+    return;
+  }
+  if (event.type === "RoundStarted") {
+    clearShipPositionSnapshot(previousSnapshot);
     return;
   }
   if (event.type === "AccomplicePlaced") {
@@ -692,11 +877,13 @@ function playEventAnimation(event, previousSnapshot, nextSnapshot) {
     return;
   }
   if (event.type === "DiceRolled") {
-    playDiceAnimation(event.data?.results || {}, previousSnapshot, nextSnapshot);
+    applyDiceToSnapshot(event.data?.results || {}, previousSnapshot);
+    if (animate) playDiceAnimation(event.data?.results || {}, beforeShips, previousSnapshot?.ships || {});
     return;
   }
   if (event.type === "NavigatorMoved") {
-    playNavigatorAnimation(event.data?.moves || [], previousSnapshot, nextSnapshot);
+    applyNavigatorToSnapshot(event.data?.moves || [], previousSnapshot);
+    if (animate) playNavigatorAnimation(event.data?.moves || [], beforeShips, previousSnapshot?.ships || {});
     return;
   }
   if (event.type === "PiratesLootedShip") {
@@ -704,55 +891,86 @@ function playEventAnimation(event, previousSnapshot, nextSnapshot) {
     return;
   }
   if (event.type === "ShipArrived" || event.type === "ShipDocked") {
-    syncEventShipToFinalSnapshot(event.data?.shipId, previousSnapshot, nextSnapshot);
+    applyShipStatusToSnapshot(event.data?.shipId, event.type, previousSnapshot);
   }
 }
 
-function playDiceAnimation(results, eventSnapshot, nextSnapshot) {
+function playDiceAnimation(results, beforeShips, afterShips) {
+  const animations = [];
   for (const [shipId, roll] of Object.entries(results || {})) {
-    animateShipDelta(shipId, Number(roll || 0), eventSnapshot, nextSnapshot, `+${roll}`);
+    animations.push(buildShipFrameAnimation(shipId, beforeShips, afterShips, `+${roll}`));
   }
+  enqueueShipAnimationGroup(animations);
 }
 
-function playNavigatorAnimation(moves, eventSnapshot, nextSnapshot) {
+function playNavigatorAnimation(moves, beforeShips, afterShips) {
+  const animations = [];
   for (const move of moves || []) {
     const delta = Number(move?.delta || 0);
     if (!delta) continue;
-    animateShipDelta(move.shipId, delta, eventSnapshot, nextSnapshot, `${delta > 0 ? "+" : ""}${delta}`);
+    animations.push(buildShipFrameAnimation(move.shipId, beforeShips, afterShips, `${delta > 0 ? "+" : ""}${delta}`));
   }
+  enqueueShipAnimationGroup(animations);
 }
 
-function playShipStartsAnimation(starts, eventSnapshot, nextSnapshot) {
-  const selected = selectedShipIdsForGame(eventSnapshot?.game || nextSnapshot?.game || null);
+function playShipStartsAnimation(starts, beforeShips, afterShips) {
+  const selected = Object.keys(afterShips || {}).map(Number).sort((a, b) => a - b);
+  const animations = [];
   for (const shipId of selected) {
     const start = Number(starts?.[shipId] ?? starts?.[String(shipId)] ?? 0);
-    const ship = eventSnapshot?.ships?.[shipId];
-    const currentPosition = Number(ship?.position || 0);
-    const delta = start - currentPosition;
-    animateShipDelta(shipId, delta, eventSnapshot, nextSnapshot, delta ? `${delta >= 0 ? "+" : ""}${delta}` : "");
+    animations.push(buildShipFrameAnimation(shipId, beforeShips, afterShips, `\u8d77\u70b9 ${start}`));
   }
+  enqueueShipAnimationGroup(animations);
 }
 
-function animateShipDelta(shipId, delta, eventSnapshot, nextSnapshot, label) {
+function buildShipFrameAnimation(shipId, beforeShips, afterShips, label) {
   const id = Number(shipId);
-  const ship = eventSnapshot?.ships?.[id] || nextSnapshot?.ships?.[id];
-  if (!ship?.point) return;
-  const startPoint = ship.point;
-  const nextPosition = Math.max(0, Number(ship.position || 0) + Number(delta || 0));
-  const endPoint = shipPoint(shipBoardPositionForAnimation(nextPosition, ship.status), ship.routeIndex);
+  const before = beforeShips?.[id] || beforeShips?.[String(id)];
+  const after = afterShips?.[id] || afterShips?.[String(id)];
+  if (!before || !after || Number(before.position) < 0 || Number(after.position) < 0) return null;
+  const startPoint = shipPointForSnapshotShip(before);
+  const endPoint = shipPointForSnapshotShip(after);
   const moved = pointDistance(startPoint, endPoint) > 0.1;
-  const updatedShip = {
-    ...ship,
-    position: nextPosition,
-    point: endPoint,
+  if (!moved && !label) return null;
+  return {
+    shipId: id,
+    startPoint,
+    endPoint,
+    label,
+    moved,
+    beforeShipInfo: { ...before, point: startPoint },
+    shipInfo: { ...after, point: endPoint },
   };
-  if (moved || label) enqueueShipAnimation(id, startPoint, endPoint, label, moved, updatedShip);
-  if (eventSnapshot?.ships) {
-    eventSnapshot.ships[id] = updatedShip;
+}
+
+function shipPointForSnapshotShip(ship) {
+  if (!ship || Number(ship.position) < 0) return null;
+  return shipPoint(shipBoardPositionForAnimation(ship.position, ship.status), ship.routeIndex || 1);
+}
+
+function clearShipPositionSnapshot(snapshot) {
+  if (!snapshot) return;
+  for (const ship of Object.values(snapshot.ships || {})) {
+    ship.position = -1;
+    ship.point = null;
   }
 }
 
-function syncEventShipToFinalSnapshot(shipId, eventSnapshot, nextSnapshot) {
+function applyShipStatusToSnapshot(shipId, eventType, snapshot, options = {}) {
+  const id = Number(shipId);
+  const ship = snapshot?.ships?.[id] || snapshot?.ships?.[String(id)];
+  if (!ship || !snapshot?.ships) return;
+  const status = eventType === "ShipArrived" ? "arrived" : "docked";
+  const updated = {
+    ...ship,
+    status,
+  };
+  updated.point = shipPointForSnapshotShip(updated);
+  snapshot.ships[id] = updated;
+  if (options.queue !== false) enqueueShipInfoUpdate(id, updated);
+}
+
+function syncEventShipToFinalSnapshot(shipId, eventSnapshot, nextSnapshot, options = {}) {
   const id = Number(shipId);
   const finalShip = nextSnapshot?.ships?.[id];
   if (!finalShip || !eventSnapshot?.ships) return;
@@ -760,7 +978,7 @@ function syncEventShipToFinalSnapshot(shipId, eventSnapshot, nextSnapshot) {
     ...finalShip,
     point: finalShip.point ? { ...finalShip.point } : null,
   };
-  enqueueShipInfoUpdate(id, eventSnapshot.ships[id]);
+  if (options.queue !== false) enqueueShipInfoUpdate(id, eventSnapshot.ships[id]);
 }
 
 function pointDistance(a, b) {
@@ -769,17 +987,17 @@ function pointDistance(a, b) {
 }
 
 function queuePlacedPieceUpdate(data, sourceGame) {
-  const positionType = data.positionType || "";
   const key = placementVisualQueueKey(data);
+  const commit = () => syncPlacementCell(data, sourceGame, pieceFromEventData(data));
   queueAnimation(key, (done) => {
-    syncPlacementCell(data, sourceGame);
+    commit();
     const target = placedPieceElement(data);
     if (!animationsEnabled || !target) {
       done();
       return null;
     }
     return startElementPulse(target, "anim-piece-pulse", done);
-  });
+  }, commit);
 }
 
 function placementVisualQueueKey(data) {
@@ -796,34 +1014,34 @@ function placementVisualQueueKey(data) {
   return `cell:${positionType || "unknown"}:${data.playerId || ""}`;
 }
 
-function syncPlacementCell(data, sourceGame) {
+function syncPlacementCell(data, sourceGame, fallbackPiece = undefined) {
   const positionType = data.positionType || "";
   if (positionType === "ship") {
-    if (!data.stowaway) syncShipSeatCell(data.shipId, data.playerId, sourceGame, shipSeatIndexFromEventData(data), pieceFromEventData(data));
+    if (!data.stowaway) syncShipSeatCell(data.shipId, data.playerId, sourceGame, shipSeatIndexFromEventData(data), fallbackPiece);
     return;
   }
   if (positionType === "port") {
-    syncBoardSlotCell("port", data.slot, sourceGame);
+    syncBoardSlotCell("port", data.slot, sourceGame, fallbackPiece);
     return;
   }
   if (positionType === "dock") {
-    syncBoardSlotCell("dock", data.slot, sourceGame);
+    syncBoardSlotCell("dock", data.slot, sourceGame, fallbackPiece);
     return;
   }
   if (positionType === "pirate") {
-    syncSpecialSlotCell("pirate", slotIdFromEventData(data, specialPieceSlotIndex("pirate", data.playerId)), sourceGame);
+    syncSpecialSlotCell("pirate", slotIdFromEventData(data, specialPieceSlotIndex("pirate", data.playerId)), sourceGame, fallbackPiece);
     return;
   }
   if (positionType === "navigatorSmall") {
-    syncSpecialSlotCell("navigatorSmall", "small", sourceGame);
+    syncSpecialSlotCell("navigatorSmall", "small", sourceGame, fallbackPiece);
     return;
   }
   if (positionType === "navigatorBig") {
-    syncSpecialSlotCell("navigatorBig", "big", sourceGame);
+    syncSpecialSlotCell("navigatorBig", "big", sourceGame, fallbackPiece);
     return;
   }
   if (positionType === "insurance") {
-    syncSpecialSlotCell("insurance", "insurance", sourceGame);
+    syncSpecialSlotCell("insurance", "insurance", sourceGame, fallbackPiece);
   }
 }
 
@@ -934,22 +1152,22 @@ function updateTopShipSeatElement(target, shipId, seatIndex, occupant, cost) {
   }
 }
 
-function syncBoardSlotCell(kind, slotId, sourceGame) {
+function syncBoardSlotCell(kind, slotId, sourceGame, fallbackPiece = undefined) {
   const slot = kind === "port"
     ? sourceGame?.board?.ports?.[slotId]
     : sourceGame?.board?.docks?.[slotId];
   const target = document.querySelector(`.board-slot[data-kind="${selectorValue(kind)}"][data-slot-id="${selectorValue(slotId)}"]`);
-  updateBoardSlotPieceElement(target, slot?.occupant);
+  updateBoardSlotPieceElement(target, fallbackPiece === undefined ? slot?.occupant : fallbackPiece);
 }
 
-function syncSpecialSlotCell(kind, slotId, sourceGame) {
+function syncSpecialSlotCell(kind, slotId, sourceGame, fallbackPiece = undefined) {
   let piece = null;
   if (kind === "pirate") piece = (sourceGame?.board?.pirates || [])[Math.max(0, Number(slotId) - 1)];
   if (kind === "navigatorSmall") piece = sourceGame?.board?.smallNavigator;
   if (kind === "navigatorBig") piece = sourceGame?.board?.bigNavigator;
   if (kind === "insurance") piece = sourceGame?.board?.insurance;
   const target = document.querySelector(`.board-slot[data-kind="${selectorValue(kind)}"][data-slot-id="${selectorValue(slotId)}"]`);
-  updateBoardSlotPieceElement(target, piece);
+  updateBoardSlotPieceElement(target, fallbackPiece === undefined ? piece : fallbackPiece);
 }
 
 function updateBoardSlotPieceElement(target, piece) {
@@ -963,72 +1181,108 @@ function updateBoardSlotPieceElement(target, piece) {
   if (labels) labels.hidden = Boolean(piece);
 }
 
-function enqueueShipAnimation(shipId, startPoint, endPoint, label, moved, shipInfo) {
-  queueAnimation(`ship:${shipId}`, (done, wasQueued) => {
-    const ship = shipElement(shipId);
-    if (!ship) {
-      done();
-      return null;
+function enqueueShipAnimationGroup(items) {
+  const animations = (items || []).filter(Boolean);
+  if (!animations.length) return;
+  queueAnimation("ship:group", (done) => {
+    let remaining = animations.length;
+    const cleanups = [];
+    const finishOne = () => {
+      remaining--;
+      if (remaining <= 0) done();
+    };
+    for (const item of animations) {
+      cleanups.push(startShipAnimation(item, finishOne));
     }
-    let frame = 0;
-    let badge = null;
-    let infoTimer = 0;
-    if (moved) {
-      const actualStart = readShipPoint(ship) || startPoint || endPoint;
-      if (!animationsEnabled) {
-        finishShipMove(ship, endPoint);
-        updateShipElementInfo(ship, shipInfo);
-        done();
-        return null;
-      }
-      ship.classList.remove("animating-move");
-      ship.style.transition = "none";
-      ship.style.left = `${actualStart.x}%`;
-      ship.style.top = `${actualStart.y}%`;
-      void ship.offsetWidth;
-      ship.style.transition = "";
-      ship.classList.add("animating-move");
-      frame = requestAnimationFrame(() => {
-        ship.style.left = `${endPoint.x}%`;
-        ship.style.top = `${endPoint.y}%`;
-      });
-      infoTimer = setTimeout(() => {
-        finishShipMove(ship, endPoint);
-        updateShipElementInfo(ship, shipInfo);
-      }, 680);
-    } else if (shipInfo) {
-      updateShipElementInfo(ship, shipInfo);
-    }
-    if (label) {
-      clearShipFloatBadges(ship);
-      if (animationsEnabled) {
-        badge = document.createElement("span");
-        badge.className = "ship-float";
-        badge.textContent = label;
-        ship.appendChild(badge);
-      }
-    }
-    if (!animationsEnabled) {
-      done();
-      return null;
-    }
-    const timer = setTimeout(() => {
-      if (moved) finishShipMove(ship, endPoint);
-      updateShipElementInfo(ship, shipInfo);
-      if (badge) badge.remove();
-      done();
-    }, BOARD_ANIMATION_DURATION_MS);
     return {
       finish: (snap) => {
-        cancelAnimationFrame(frame);
-        clearTimeout(infoTimer);
-        clearTimeout(timer);
-        if (snap && moved) finishShipMove(ship, endPoint);
-        if (snap) updateShipElementInfo(ship, shipInfo);
-        if (badge) badge.remove();
+        for (const cleanup of cleanups) cleanup?.finish?.(snap);
       },
     };
-  });
+  }, () => commitShipAnimationGroup(animations));
+}
+
+function commitShipAnimationGroup(items) {
+  for (const item of items || []) {
+    if (!item) continue;
+    const ship = shipElement(item.shipId);
+    if (item.moved) finishShipMove(ship, item.endPoint);
+    updateShipElementInfo(ship, item.shipInfo);
+    syncStateShipInfo(item.shipId, item.shipInfo);
+    redrawShipFromSnapshot(item.shipId, item.shipInfo);
+    clearShipFloatBadges(ship);
+  }
+}
+
+function startShipAnimation(item, done) {
+  const { shipId, startPoint, endPoint, label, moved, shipInfo, beforeShipInfo } = item;
+  if (beforeShipInfo) redrawShipFromSnapshot(shipId, beforeShipInfo);
+  const ship = shipElement(shipId);
+  if (!ship) {
+    done();
+    return null;
+  }
+  let frame = 0;
+  let badge = null;
+  let infoTimer = 0;
+  if (moved) {
+    if (!animationsEnabled) {
+      finishShipMove(ship, endPoint);
+      updateShipElementInfo(ship, shipInfo);
+      done();
+      return null;
+    }
+    ship.classList.remove("animating-move");
+    ship.style.transition = "none";
+    ship.style.left = `${startPoint.x}%`;
+    ship.style.top = `${startPoint.y}%`;
+    void ship.offsetWidth;
+    ship.style.transition = "";
+    ship.classList.add("animating-move");
+    frame = requestAnimationFrame(() => {
+      ship.style.left = `${endPoint.x}%`;
+      ship.style.top = `${endPoint.y}%`;
+    });
+    infoTimer = setTimeout(() => {
+      finishShipMove(ship, endPoint);
+      updateShipElementInfo(ship, shipInfo);
+    }, 680);
+  } else if (shipInfo) {
+    updateShipElementInfo(ship, shipInfo);
+  }
+  if (label) {
+    clearShipFloatBadges(ship);
+    if (animationsEnabled) {
+      badge = document.createElement("span");
+      badge.className = "ship-float";
+      badge.textContent = label;
+      ship.appendChild(badge);
+    }
+  }
+  if (!animationsEnabled) {
+    done();
+    return null;
+  }
+  const timer = setTimeout(() => {
+    if (moved) finishShipMove(ship, endPoint);
+    updateShipElementInfo(ship, shipInfo);
+    if (badge) badge.remove();
+    done();
+  }, BOARD_ANIMATION_DURATION_MS);
+  return {
+    finish: (snap) => {
+      cancelAnimationFrame(frame);
+      clearTimeout(infoTimer);
+      clearTimeout(timer);
+      if (snap && moved) finishShipMove(ship, endPoint);
+      if (snap) {
+        updateShipElementInfo(ship, shipInfo);
+        syncStateShipInfo(shipId, shipInfo);
+        redrawShipFromSnapshot(shipId, shipInfo);
+      }
+      if (badge) badge.remove();
+    },
+  };
 }
 
 function clearShipFloatBadges(ship) {
@@ -1037,11 +1291,16 @@ function clearShipFloatBadges(ship) {
 
 function enqueueShipInfoUpdate(shipId, shipInfo) {
   if (!shipInfo) return;
-  queueAnimation(`ship:${shipId}`, (done) => {
+  const commit = () => {
     updateShipElementInfo(shipElement(shipId), shipInfo);
+    syncStateShipInfo(shipId, shipInfo);
+    redrawShipFromSnapshot(shipId, shipInfo);
+  };
+  queueAnimation("ship:group", (done) => {
+    commit();
     done();
     return null;
-  });
+  }, commit);
 }
 
 function updateShipElementInfo(ship, shipInfo) {
@@ -1050,6 +1309,39 @@ function updateShipElementInfo(ship, shipInfo) {
   const lines = ship.querySelectorAll(".ship-line");
   if (lines[0]) lines[0].textContent = `位置 ${shipTextPosition(Number(shipInfo.position || 0))}`;
   if (lines[1]) lines[1].textContent = shipStatusName(shipInfo.status || "");
+}
+
+function syncStateShipInfo(shipId, shipInfo) {
+  if (!state?.ships || !shipInfo) return;
+  const id = Number(shipId);
+  const key = state.ships[id] ? id : String(id);
+  const ship = state.ships[key];
+  if (!ship) return;
+  ship.position = Number(shipInfo.position || 0);
+  ship.status = shipInfo.status || ship.status || "";
+  ship.routeIndex = Number(shipInfo.routeIndex || ship.routeIndex || 1);
+}
+
+function redrawShipFromSnapshot(shipId, shipInfo) {
+  const existing = shipElement(shipId);
+  if (!existing || !shipInfo) return;
+  const id = Number(shipId);
+  const current = getShip(id) || {};
+  const routeIndex = Number(shipInfo.routeIndex || current.routeIndex || 1);
+  const ship = {
+    ...current,
+    shipId: Number(current.shipId || id),
+    goodsId: Number(current.goodsId || id),
+    position: Number(shipInfo.position || 0),
+    status: shipInfo.status || current.status || "sailing",
+    routeIndex,
+  };
+  const holder = document.createElement("div");
+  holder.innerHTML = renderShip(ship, routeIndex - 1);
+  const next = holder.firstElementChild;
+  if (!next) return;
+  existing.replaceWith(next);
+  wireShipElement(next);
 }
 
 function finishShipMove(ship, endPoint) {
@@ -1062,7 +1354,7 @@ function finishShipMove(ship, endPoint) {
 
 function showPirateCue(shipId) {
   const id = Number(shipId);
-  queueAnimation(`ship:${id}`, (done) => {
+  queueAnimation("ship:group", (done) => {
     const ship = shipElement(id);
     if (!ship) {
       done();
@@ -1091,6 +1383,10 @@ function showPirateCue(shipId) {
         icon.remove();
       },
     };
+  }, () => {
+    const ship = shipElement(id);
+    ship?.classList.remove("pirate-warning");
+    ship?.querySelectorAll(".pirate-cue").forEach((item) => item.remove());
   });
 }
 
@@ -1098,8 +1394,9 @@ function queuePirateBoardedPieceUpdate(data, sourceGame) {
   const shipId = data.shipId;
   const playerId = data.playerId;
   const seatIndex = shipSeatIndexFromEventData(data);
+  const commit = () => syncShipSeatCell(shipId, playerId, sourceGame, seatIndex, pieceFromEventData(data));
   queueAnimation(`cell:ship:${shipId}:${seatIndex}`, (done) => {
-    syncShipSeatCell(shipId, playerId, sourceGame, seatIndex, pieceFromEventData(data));
+    commit();
     const piece = shipSeatElement(shipId, seatIndex);
     if (!animationsEnabled) {
       done();
@@ -1110,7 +1407,7 @@ function queuePirateBoardedPieceUpdate(data, sourceGame) {
       return null;
     }
     return startElementPulse(piece, "anim-piece-pulse", done);
-  });
+  }, commit);
 }
 
 function startElementPulse(element, className, done) {
@@ -1163,10 +1460,10 @@ function cancelActiveAnimation(key, snapMoves) {
   return active;
 }
 
-function queueAnimation(key, task) {
+function queueAnimation(key, task, commit = null) {
   const queue = animationQueues.get(key) || [];
   const wasQueued = activeAnimations.has(key) || queue.length > 0;
-  queue.push({ task, wasQueued });
+  queue.push({ task, wasQueued, commit });
   animationQueues.set(key, queue);
   if (!activeAnimations.has(key)) runNextAnimation(key);
 }
@@ -1184,6 +1481,7 @@ function runNextAnimation(key) {
   const done = () => {
     if (activeAnimations.get(key) !== active) return;
     activeAnimations.delete(key);
+    item.commit?.();
     runNextAnimation(key);
   };
   const cleanup = item.task(done, item.wasQueued);
@@ -1199,16 +1497,16 @@ function hasActiveOrQueuedAnimations() {
 }
 
 function scheduleDeferredRenderFlush() {
-  if (!deferredRenderRoom || deferredRenderApplying) return;
+  if (!deferredRenderRoom || !deferredRenderAllowed || deferredRenderApplying) return;
   setTimeout(() => {
     flushDeferredRender().catch(showError);
   }, 0);
 }
 
 async function flushDeferredRender() {
-  if (deferredRenderApplying || hasActiveOrQueuedAnimations() || !deferredRenderRoom) return;
+  if (deferredRenderApplying || hasActiveOrQueuedAnimations() || !deferredRenderRoom || !deferredRenderAllowed) return;
   const nextRoom = deferredRenderRoom;
-  deferredRenderRoom = null;
+  clearDeferredRenderRoom();
   deferredRenderApplying = true;
   try {
     await applyRoomPayload(nextRoom, { animate: false });
@@ -1218,20 +1516,8 @@ async function flushDeferredRender() {
   if (deferredRenderRoom && !hasActiveOrQueuedAnimations()) scheduleDeferredRenderFlush();
 }
 
-function hasShipAnimation(shipId) {
-  const key = `ship:${shipId}`;
-  return activeAnimations.has(key) || Boolean(animationQueues.get(key)?.length);
-}
-
 function shipElement(shipId) {
   return document.querySelector(`.sea-overlay .ship[data-ship-id="${selectorValue(shipId)}"]`);
-}
-
-function readShipPoint(ship) {
-  const x = Number(String(ship?.style?.left || "").replace("%", ""));
-  const y = Number(String(ship?.style?.top || "").replace("%", ""));
-  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
-  return { x, y };
 }
 
 function selectorValue(value) {
@@ -1339,25 +1625,49 @@ async function loadLegalActions() {
 }
 
 function canUnlockLocalActions(loadedActions, loadedEventSeq) {
+  if (pendingSubmittedAction?.type === "AI_ROUND") {
+    return canUnlockAIRoundLock();
+  }
   if (!Array.isArray(loadedActions) || loadedActions.length === 0) return false;
   if (!isLocalActionWindow()) return false;
   if (!pendingSubmittedAction) return true;
   return Number(loadedEventSeq || 0) > Number(pendingSubmittedAction.expectedEventSeq || 0);
 }
 
+function canUnlockAIRoundLock() {
+  if (!state || !pendingSubmittedAction) return false;
+  if (state.status === "ended") return true;
+  const targetRound = Number(pendingSubmittedAction.targetRoundNumber || pendingSubmittedAction.roundNumber || 0);
+  const currentRound = Number(state.roundNumber || 0);
+  if (!targetRound) return false;
+  if (currentRound > targetRound) return true;
+  return currentRound === targetRound && state.phase === "RoundReview";
+}
+
 function isLocalActionWindow() {
-  if (!state) return false;
-  if (state.phase === "RoundReview") return true;
+  return isLocalActionWindowForGame(state);
+}
+
+function isLocalActionWindowForGame(game) {
+  if (!game || game.status === "ended") return false;
   const localPlayerId = getLocalPlayerId();
-  return localPlayerId > 0 && expectedActorIdForPhase() === localPlayerId;
+  if (localPlayerId <= 0) return false;
+  if (game.phase === "RoundReview") {
+    return !(game.round?.confirmedPlayers || {})[localPlayerId];
+  }
+  return expectedActorIdForGame(game) === localPlayerId;
 }
 
 function expectedActorIdForPhase() {
-  if (!state) return 0;
-  if (state.phase === "HarborMasterBuyShare" || state.phase === "HarborMasterSelectGoods" || state.phase === "HarborMasterSetShips") {
-    return Number(state.harborMaster || state.currentPlayer || 0);
+  return expectedActorIdForGame(state);
+}
+
+function expectedActorIdForGame(game) {
+  if (!game) return 0;
+  if (game.phase === "HarborMasterBuyShare" || game.phase === "HarborMasterSelectGoods" || game.phase === "HarborMasterSetShips") {
+    return Number(game.harborMaster || game.currentPlayer || 0);
   }
-  return Number(state.currentPlayer || 0);
+  return Number(game.currentPlayer || 0);
 }
 
 function canLocalAIForGame(game) {
@@ -1365,7 +1675,7 @@ function canLocalAIForGame(game) {
   if (game.phase === "RoundReview") {
     return !(game.round?.confirmedPlayers || {})[getLocalPlayerId()];
   }
-  return expectedActorIdForPhase() === getLocalPlayerId();
+  return expectedActorIdForGame(game) === getLocalPlayerId();
 }
 
 function lockLocalActions(actionRequest) {
@@ -1373,11 +1683,9 @@ function lockLocalActions(actionRequest) {
   pendingSubmittedAction = actionRequest || null;
   actions = [];
   actionEventSeq = null;
+  resetTransientControls();
   hideBoardActionTargets();
-  renderContextControls();
-  renderActionList();
-  setBusyButtons(false);
-  syncActionLockUI();
+  renderRoom();
 }
 
 function unlockLocalActions() {
@@ -1428,7 +1736,11 @@ async function submitAction(action, payloadOverride) {
 async function aiStep() {
   if (!canLocalAIForGame(state) || aiBusy || actionInputLocked) return;
   aiBusy = true;
-  lockLocalActions({ type: "AI_STEP", expectedEventSeq: state?.eventSeq ?? actionEventSeq ?? 0 });
+  lockLocalActions({
+    type: "AI_STEP",
+    expectedEventSeq: state?.eventSeq ?? actionEventSeq ?? 0,
+    roundNumber: state?.roundNumber ?? 0,
+  });
   setBusyButtons(true);
   try {
     await api(`/games/${encodeURIComponent(gameId)}/ai-step`, { method: "POST" });
@@ -1445,7 +1757,13 @@ async function aiStep() {
 async function aiAdvanceRound() {
   if (!canLocalAIForGame(state) || aiBusy || actionInputLocked) return;
   aiBusy = true;
-  lockLocalActions({ type: "AI_ROUND", expectedEventSeq: state?.eventSeq ?? actionEventSeq ?? 0 });
+  const currentRound = Number(state?.roundNumber || 0);
+  lockLocalActions({
+    type: "AI_ROUND",
+    expectedEventSeq: state?.eventSeq ?? actionEventSeq ?? 0,
+    roundNumber: currentRound,
+    targetRoundNumber: state?.phase === "RoundReview" ? currentRound + 1 : currentRound,
+  });
   setBusyButtons(true);
   try {
     await api(`/games/${encodeURIComponent(gameId)}/ai-round`, { method: "POST" });
@@ -1708,7 +2026,7 @@ function wireBoardSlots(containerId) {
 }
 
 function renderSea() {
-  if (hasActiveOrQueuedAnimations()) return;
+  if (hasActiveOrQueuedAnimations() && !forceAnimationBaseRender) return;
   const selected = selectedShipIds();
   if (selected.length === 0) {
     $("seaLanes").innerHTML = `<div class="empty-note">欢迎来到马尼拉！</div>`;
@@ -1720,15 +2038,17 @@ function renderSea() {
     return ship ? renderShip(ship, index) : "";
   }).join("");
 
-  $("seaLanes").querySelectorAll(".ship[data-action-key]").forEach((el) => {
-    const action = actionByKey(el.dataset.actionKey);
-    if (!action) return;
-    el.addEventListener("click", () => submitAction(action).catch(showError));
-  });
+  $("seaLanes").querySelectorAll(".ship[data-action-key]").forEach(wireShipElement);
+}
+
+function wireShipElement(el) {
+  const action = actionByKey(el.dataset.actionKey);
+  if (!action) return;
+  el.addEventListener("click", () => submitAction(action).catch(showError));
 }
 
 function renderTopShips() {
-  if (hasTopShipSeatAnimations()) return;
+  if (hasTopShipSeatAnimations() && !forceAnimationBaseRender) return;
   const selected = (state.round?.selectedGoods || []).map(Number).slice(0, 3);
   if (selected.length === 0) {
     $("topShips").innerHTML = `<div class="empty-note">本轮尚未选择货船。</div>`;
@@ -1816,6 +2136,7 @@ function shipTextPosition(position) {
 }
 
 function renderSpecialSlots() {
+  if (hasSpecialSlotAnimations() && !forceAnimationBaseRender) return;
   const piratePieces = pirateSlots();
   $("pirateSlots").innerHTML = [
     specialSlotHTML("船长", "花费 5", piratePieces[0], placementAction("pirate", 1), slotLabels(5, null), "pirate", "1"),
@@ -1835,6 +2156,24 @@ function renderSpecialSlots() {
   for (const id of ["pirateSlots", "navigatorSlots", "insuranceSlot"]) {
     wireBoardSlots(id);
   }
+}
+
+function hasSpecialSlotAnimations() {
+  for (const key of activeAnimations.keys()) {
+    if (isSpecialSlotAnimationKey(key)) return true;
+  }
+  for (const [key, queue] of animationQueues.entries()) {
+    if (isSpecialSlotAnimationKey(key) && queue.length > 0) return true;
+  }
+  return false;
+}
+
+function isSpecialSlotAnimationKey(key) {
+  const value = String(key);
+  return value.startsWith("cell:pirate:")
+    || value.startsWith("cell:navigatorSmall:")
+    || value.startsWith("cell:navigatorBig:")
+    || value.startsWith("cell:insurance:");
 }
 
 function specialSlotHTML(title, meta, piece, action, labels, kind = "", slotId = "") {
@@ -2515,12 +2854,12 @@ function formatEventData(event) {
     case "ShipStartsSet": return `起点 ${formatStarts(data.starts)}`;
     case "PlayerBecameBankrupt": return `P${data.playerId} 进入破产状态${hasValue(data.cash) ? `，现金 ${data.cash}` : ""}${hasValue(data.minCost) ? `，最低可行动作费用 ${data.minCost}` : ""}`;
     case "AccomplicePlaced": return formatPlacementEvent(data);
-    case "DiceRolled": return `第 ${data.movementStep} 次移动：${formatDiceResults(data.results)}${hasEntries(data.positionsAfter) ? `；船位 ${formatPositions(data.positionsAfter)}` : ""}`;
+    case "DiceRolled": return `第 ${data.movementStep} 次移动：${formatDiceResults(data.results)}`;
     case "ShipArrived": return `${goodsName(data.shipId)} 到港 ${data.slot}${hasValue(data.position) ? `，船位 ${data.position}` : ""}`;
     case "ShipDocked": return `${goodsName(data.shipId)} 进船坞 ${data.slot}${hasValue(data.position) ? `，船位 ${data.position}` : ""}`;
     case "PirateBoarded": return `P${data.playerId}${data.role ? `（${roleName(data.role)}）` : ""} 登上 ${goodsName(data.shipId)}${data.shipRole ? `，货船身份：${roleName(data.shipRole)}` : ""}`;
     case "PirateBoardSkipped": return `P${data.playerId}${data.role ? `（${roleName(data.role)}）` : ""} 放弃登船`;
-    case "NavigatorMoved": return `P${data.playerId} ${navigatorName(data.navigator)}：${formatMoves(data.moves)}${hasEntries(data.positionsAfter) ? `；船位 ${formatPositions(data.positionsAfter)}` : ""}`;
+    case "NavigatorMoved": return `P${data.playerId} ${navigatorName(data.navigator)}：${formatMoves(data.moves)}`;
     case "NavigatorSkipped": return `P${data.playerId} ${navigatorName(data.navigator)} 未移动`;
     case "PiratesLootedShip": return `${data.playerId ? `P${data.playerId} 将 ` : ""}${goodsName(data.shipId)} 送往${destinationName(data.destination)}`;
     case "PlayerReceivedPayout": return `P${data.playerId} 获得 ${data.amount}，来源：${payoutDetail(data)}`;
@@ -2560,11 +2899,6 @@ function formatStarts(starts) {
 function formatDiceResults(results) {
   if (!results) return "无";
   return Object.entries(results).sort(([a], [b]) => Number(a) - Number(b)).map(([id, value]) => `${goodsName(id)}+${value}`).join(" ");
-}
-
-function formatPositions(positions) {
-  if (!positions || Object.keys(positions).length === 0) return "无";
-  return Object.entries(positions).sort(([a], [b]) => Number(a) - Number(b)).map(([id, value]) => `${goodsName(id)}=${value}`).join(" ");
 }
 
 function formatMoves(moves) {
@@ -2630,10 +2964,6 @@ function payoutDetail(data) {
 
 function hasValue(value) {
   return value !== undefined && value !== null && value !== "";
-}
-
-function hasEntries(value) {
-  return value && Object.keys(value).length > 0;
 }
 
 function pieceHTML(piece) {

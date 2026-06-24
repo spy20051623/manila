@@ -392,15 +392,11 @@ func (h *Handler) handleGamePath(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, "forbidden", "token cannot act for player")
 			return
 		}
-		g, err := h.service.ApplyAction(gameID, action)
+		g, err := h.service.ApplyRoomAction(tokenFromRequest(r), action)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "badRequest", err.Error())
 			return
 		}
-		if g.Status == model.StatusEnded {
-			_ = h.service.FinishActiveRoomGame(g)
-		}
-		h.broadcastGame(gameID)
 		h.writeTokenGame(w, r, gameID, g)
 	case len(parts) == 3 && parts[2] == "ai-step" && r.Method == http.MethodPost:
 		if _, err := h.playerIDForGameAction(r, gameID); err != nil {

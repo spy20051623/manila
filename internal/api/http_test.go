@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
+	"time"
 
 	"manila/internal/app"
 	"manila/internal/rules"
@@ -166,6 +168,38 @@ func TestRoomJoinSeatsStartAndObserverVisibility(t *testing.T) {
 	if len(allowed["actions"].([]interface{})) == 0 {
 		t.Fatalf("expected seated token to receive actions, got %s", allowed)
 	}
+}
+
+func TestGameActionEndpointTriggersRoomAutomation(t *testing.T) {
+	svc := app.NewService(store.NewMemoryStore(), rules.NewEngine())
+	h := NewHandler(svc)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	token := roomJoinNamed(t, mux, "Alice")
+	roomRequest(t, mux, http.MethodPost, "/room/seats/1/claim", token, nil)
+	roomRequest(t, mux, http.MethodPost, "/room/seats/2/ai", token, nil)
+	roomRequest(t, mux, http.MethodPost, "/room/seats/3/ai", token, nil)
+	roomRequest(t, mux, http.MethodPost, "/room/seats/4/ai", token, nil)
+	started := roomRequest(t, mux, http.MethodPost, "/room/ready", token, nil)
+	gameID := started["room"].(map[string]interface{})["gameId"].(string)
+
+	allowed := roomRequest(t, mux, http.MethodGet, "/games/"+gameID+"/actions", token, nil)
+	seq := int(allowed["eventSeq"].(float64))
+	body := bytes.NewBufferString(`{"playerId":1,"type":"PassBid","expectedEventSeq":` + strconv.Itoa(seq) + `}`)
+	posted := roomRequest(t, mux, http.MethodPost, "/games/"+gameID+"/actions", token, body)
+	postedSeq := int(posted["eventSeq"].(float64))
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		state := roomRequest(t, mux, http.MethodGet, "/games/"+gameID+"/state", token, nil)
+		game := state["game"].(map[string]interface{})
+		if int(game["eventSeq"].(float64)) > postedSeq {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("expected room automation to advance after game action endpoint, eventSeq remained %d", postedSeq)
 }
 
 func TestRoomJoinRejectsDuplicateNames(t *testing.T) {

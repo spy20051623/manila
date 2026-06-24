@@ -20,7 +20,7 @@ func TestHTTPCreateStartAndActions(t *testing.T) {
 
 	body := bytes.NewBufferString(`{"seed":42}`)
 	res := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/games", body)
+	req := httptest.NewRequest(http.MethodPost, "/debug/games", body)
 	mux.ServeHTTP(res, req)
 	if res.Code != http.StatusCreated {
 		t.Fatalf("create status %d body %s", res.Code, res.Body.String())
@@ -33,14 +33,14 @@ func TestHTTPCreateStartAndActions(t *testing.T) {
 	gameID := game["gameId"].(string)
 
 	res = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/games/"+gameID+"/start", nil)
+	req = httptest.NewRequest(http.MethodPost, "/debug/games/"+gameID+"/start", nil)
 	mux.ServeHTTP(res, req)
 	if res.Code != http.StatusOK {
 		t.Fatalf("start status %d body %s", res.Code, res.Body.String())
 	}
 
 	res = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/games/"+gameID+"/players/1/actions", nil)
+	req = httptest.NewRequest(http.MethodGet, "/debug/games/"+gameID+"/players/1/actions", nil)
 	mux.ServeHTTP(res, req)
 	if res.Code != http.StatusOK {
 		t.Fatalf("actions status %d body %s", res.Code, res.Body.String())
@@ -82,7 +82,7 @@ func TestHTTPTrainedAI(t *testing.T) {
 	h.Register(mux)
 
 	res := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/games", bytes.NewBufferString(`{"seed":88}`))
+	req := httptest.NewRequest(http.MethodPost, "/debug/games", bytes.NewBufferString(`{"seed":88}`))
 	mux.ServeHTTP(res, req)
 	if res.Code != http.StatusCreated {
 		t.Fatalf("create status %d body %s", res.Code, res.Body.String())
@@ -94,14 +94,14 @@ func TestHTTPTrainedAI(t *testing.T) {
 	gameID := created["game"].(map[string]interface{})["gameId"].(string)
 
 	res = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/games/"+gameID+"/start", nil)
+	req = httptest.NewRequest(http.MethodPost, "/debug/games/"+gameID+"/start", nil)
 	mux.ServeHTTP(res, req)
 	if res.Code != http.StatusOK {
 		t.Fatalf("start status %d body %s", res.Code, res.Body.String())
 	}
 
 	res = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/games/"+gameID+"/players/1/trained-ai", nil)
+	req = httptest.NewRequest(http.MethodPost, "/debug/games/"+gameID+"/players/1/trained-ai", nil)
 	mux.ServeHTTP(res, req)
 	if res.Code != http.StatusOK {
 		t.Fatalf("trained ai status %d body %s", res.Code, res.Body.String())
@@ -131,16 +131,20 @@ func TestRoomJoinSeatsStartAndObserverVisibility(t *testing.T) {
 	if room["status"] != "inProgress" {
 		t.Fatalf("expected inProgress room, got %s", started)
 	}
-	ownGame := room["game"].(map[string]interface{})
+	if room["game"] != nil {
+		t.Fatalf("room view should not include game payload: %s", started)
+	}
+	gameID := room["gameId"].(string)
+	ownState := roomRequest(t, mux, http.MethodGet, "/games/"+gameID+"/state", token, nil)
+	ownGame := ownState["game"].(map[string]interface{})
 	ownPlayers := ownGame["players"].(map[string]interface{})
 	ownP1 := ownPlayers["1"].(map[string]interface{})
 	if _, ok := ownP1["shares"].(map[string]interface{}); !ok {
 		t.Fatalf("seated token should see own shares: %s", started)
 	}
 
-	observer := roomRequest(t, mux, http.MethodGet, "/room/state", "", nil)
-	observerRoom := observer["room"].(map[string]interface{})
-	observerGame := observerRoom["game"].(map[string]interface{})
+	observer := roomRequest(t, mux, http.MethodGet, "/games/"+gameID+"/state", "", nil)
+	observerGame := observer["game"].(map[string]interface{})
 	observerPlayers := observerGame["players"].(map[string]interface{})
 	observerP1 := observerPlayers["1"].(map[string]interface{})
 	if hidden, ok := observerP1["hiddenShareCount"].(float64); !ok || hidden == 0 {
@@ -149,6 +153,18 @@ func TestRoomJoinSeatsStartAndObserverVisibility(t *testing.T) {
 	shares := observerP1["shares"].(map[string]interface{})
 	if len(shares) != 0 {
 		t.Fatalf("observer should not see initial private shares, got %v", shares)
+	}
+
+	forbidden := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/games/"+gameID+"/actions", nil)
+	mux.ServeHTTP(forbidden, req)
+	if forbidden.Code != http.StatusForbidden {
+		t.Fatalf("expected unauthenticated production actions to fail, status %d body %s", forbidden.Code, forbidden.Body.String())
+	}
+
+	allowed := roomRequest(t, mux, http.MethodGet, "/games/"+gameID+"/actions", token, nil)
+	if len(allowed["actions"].([]interface{})) == 0 {
+		t.Fatalf("expected seated token to receive actions, got %s", allowed)
 	}
 }
 

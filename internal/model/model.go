@@ -250,10 +250,11 @@ type Score struct {
 	Rank     int `json:"rank"`
 }
 
-type RoomSettlement struct {
-	GameID   string  `json:"gameId,omitempty"`
-	EventSeq int     `json:"eventSeq"`
-	Scores   []Score `json:"scores"`
+type CompletedGameSummary struct {
+	GameID      string  `json:"gameId"`
+	RoundNumber int     `json:"roundNumber"`
+	EventSeq    int     `json:"eventSeq"`
+	Scores      []Score `json:"scores"`
 }
 
 type RoomStatus string
@@ -288,20 +289,20 @@ type RoomParticipant struct {
 }
 
 type RoomView struct {
-	Status           RoomStatus      `json:"status"`
-	Seats            []RoomSeat      `json:"seats"`
-	Participant      RoomParticipant `json:"participant"`
-	GameID           string          `json:"gameId,omitempty"`
-	Game             *Game           `json:"game,omitempty"`
-	EventSeq         int             `json:"eventSeq"`
-	ClosingSeconds   int             `json:"closingSeconds,omitempty"`
-	CloseReason      string          `json:"closeReason,omitempty"`
-	LastSettlement   *RoomSettlement `json:"lastSettlement,omitempty"`
-	SuggestedName    string          `json:"suggestedName,omitempty"`
-	CanManageAI      bool            `json:"canManageAI"`
-	CanReady         bool            `json:"canReady"`
-	CanCancelReady   bool            `json:"canCancelReady"`
-	CanLeaveSeat     bool            `json:"canLeaveSeat"`
-	CanAIForCurrent  bool            `json:"canAIForCurrent"`
-	HumanPlayerCount int             `json:"humanPlayerCount"`
+	Status           RoomStatus             `json:"status"`
+	Seats            []RoomSeat             `json:"seats"`
+	Participant      RoomParticipant        `json:"participant"`
+	GameID           string                 `json:"gameId,omitempty"`
+	Game             *Game                  `json:"game,omitempty"`
+	EventSeq         int                    `json:"eventSeq"`
+	ClosingSeconds   int                    `json:"closingSeconds,omitempty"`
+	CloseReason      string                 `json:"closeReason,omitempty"`
+	SuggestedName    string                 `json:"suggestedName,omitempty"`
+	CanManageAI      bool                   `json:"canManageAI"`
+	CanReady         bool                   `json:"canReady"`
+	CanCancelReady   bool                   `json:"canCancelReady"`
+	CanLeaveSeat     bool                   `json:"canLeaveSeat"`
+	CanAIForCurrent  bool                   `json:"canAIForCurrent"`
+	HumanPlayerCount int                    `json:"humanPlayerCount"`
+	CompletedGames   []CompletedGameSummary `json:"completedGames,omitempty"`
 }

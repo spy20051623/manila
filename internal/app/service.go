@@ -27,6 +27,7 @@ type Service struct {
 	roomMu        sync.Mutex
 	room          roomState
 	notify        func()
+	notifyGame    func(string)
 	timeoutTimer  *time.Timer
 	closeTimer    *time.Timer
 	offlineTimers map[string]*time.Timer
@@ -46,6 +47,12 @@ func (s *Service) SetNotifier(fn func()) {
 	s.roomMu.Lock()
 	defer s.roomMu.Unlock()
 	s.notify = fn
+}
+
+func (s *Service) SetGameNotifier(fn func(string)) {
+	s.roomMu.Lock()
+	defer s.roomMu.Unlock()
+	s.notifyGame = fn
 }
 
 func (s *Service) CreateGame(seed *int64) *model.Game {

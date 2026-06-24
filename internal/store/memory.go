@@ -42,3 +42,13 @@ func (s *MemoryStore) Get(id string) (*GameRef, bool) {
 	ref, ok := s.games[id]
 	return ref, ok
 }
+
+func (s *MemoryStore) List() []*GameRef {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	refs := make([]*GameRef, 0, len(s.games))
+	for _, ref := range s.games {
+		refs = append(refs, ref)
+	}
+	return refs
+}

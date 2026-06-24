@@ -8,7 +8,7 @@ import (
 	"manila/internal/store"
 )
 
-func TestFinishEndedRoomGameReturnsToLobbyWithHumanSeats(t *testing.T) {
+func TestFinishEndedRoomGameClearsSeatsAndReturnsToLobby(t *testing.T) {
 	svc := NewService(store.NewMemoryStore(), rules.NewEngine())
 
 	scores := []model.Score{
@@ -41,32 +41,21 @@ func TestFinishEndedRoomGameReturnsToLobbyWithHumanSeats(t *testing.T) {
 	if view.GameID != "" {
 		t.Fatalf("expected active game to be cleared, got %q", view.GameID)
 	}
-	if !view.Participant.Joined || view.Participant.PlayerID != 1 {
-		t.Fatalf("expected Alice to remain seated, got %+v", view.Participant)
+	if !view.Participant.Joined || view.Participant.PlayerID != 0 {
+		t.Fatalf("expected Alice token to remain joined but unseated, got %+v", view.Participant)
 	}
-	if !view.CanReady || !view.CanLeaveSeat || !view.CanManageAI {
-		t.Fatalf("expected Alice to be unready and able to manage lobby, got %+v", view)
+	if view.CanReady || view.CanLeaveSeat || !view.CanManageAI {
+		t.Fatalf("expected Alice to manage AI but choose a seat before readying, got %+v", view)
 	}
-	if view.LastSettlement == nil {
-		t.Fatal("expected settlement snapshot")
-	}
-	if view.LastSettlement.GameID != "game-1" || view.LastSettlement.EventSeq != 42 || len(view.LastSettlement.Scores) != 4 {
-		t.Fatalf("unexpected settlement snapshot: %+v", view.LastSettlement)
-	}
-
 	seats := seatsByID(view.Seats)
-	if seats[1].Type != model.SeatTypeHuman || seats[1].Ready {
-		t.Fatalf("expected P1 human seat to remain unready, got %+v", seats[1])
-	}
-	if seats[2].Type != model.SeatTypeHuman || seats[2].Ready {
-		t.Fatalf("expected P2 human seat to remain unready, got %+v", seats[2])
-	}
-	if seats[3].Type != model.SeatTypeEmpty || seats[4].Type != model.SeatTypeEmpty {
-		t.Fatalf("expected AI seats to be cleared, got P3=%+v P4=%+v", seats[3], seats[4])
+	for _, playerID := range model.PlayerOrder {
+		if seats[playerID].Type != model.SeatTypeEmpty {
+			t.Fatalf("expected P%d seat to be cleared, got %+v", playerID, seats[playerID])
+		}
 	}
 }
 
-func TestRoomViewFinalizesEndedActiveGame(t *testing.T) {
+func TestRoomViewDoesNotFinalizeEndedActiveGame(t *testing.T) {
 	st := store.NewMemoryStore()
 	svc := NewService(st, rules.NewEngine())
 	g := &model.Game{
@@ -91,11 +80,45 @@ func TestRoomViewFinalizesEndedActiveGame(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if view.Status != model.RoomStatusWaiting {
-		t.Fatalf("expected ended active game to return room to lobby, got %s", view.Status)
+	if view.Status != model.RoomStatusInProgress {
+		t.Fatalf("room view should not finalize ended active game, got %s", view.Status)
 	}
-	if view.LastSettlement == nil || view.LastSettlement.GameID != "game-1" || len(view.LastSettlement.Scores) != 1 {
-		t.Fatalf("expected settlement snapshot from ended active game, got %+v", view.LastSettlement)
+}
+
+func TestRoomViewIncludesCompletedGamesNewestFirst(t *testing.T) {
+	st := store.NewMemoryStore()
+	svc := NewService(st, rules.NewEngine())
+	st.Put(&model.Game{
+		ID:          "game-1",
+		Status:      model.StatusEnded,
+		RoundNumber: 4,
+		EventSeq:    19,
+		FinalScores: []model.Score{{PlayerID: 1, Wealth: 88, Rank: 2}},
+	})
+	st.Put(&model.Game{
+		ID:          "game-3",
+		Status:      model.StatusEnded,
+		RoundNumber: 5,
+		EventSeq:    41,
+		FinalScores: []model.Score{{PlayerID: 2, Wealth: 130, Rank: 1}},
+	})
+	st.Put(&model.Game{
+		ID:     "game-2",
+		Status: model.StatusInProgress,
+	})
+
+	view, err := svc.RoomView("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(view.CompletedGames) != 2 {
+		t.Fatalf("expected two completed games, got %+v", view.CompletedGames)
+	}
+	if view.CompletedGames[0].GameID != "game-3" || view.CompletedGames[1].GameID != "game-1" {
+		t.Fatalf("expected newest completed games first, got %+v", view.CompletedGames)
+	}
+	if got := view.CompletedGames[0].Scores[0]; got.PlayerID != 2 || got.Wealth != 130 || got.Rank != 1 {
+		t.Fatalf("expected completed scores to be included, got %+v", got)
 	}
 }
 
@@ -161,6 +184,81 @@ func TestOfflineClaimSchedulesSeatRelease(t *testing.T) {
 	seats = seatsByID(view.Seats)
 	if seats[1].Type != model.SeatTypeEmpty {
 		t.Fatalf("expected offline claimed seat to release, got %+v", seats[1])
+	}
+}
+
+func TestJoinedUnseatedParticipantCanManageAI(t *testing.T) {
+	svc := NewService(store.NewMemoryStore(), rules.NewEngine())
+
+	svc.roomMu.Lock()
+	svc.room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Online: true}
+	svc.roomMu.Unlock()
+
+	if err := svc.PlaceAI("alice", 2); err != nil {
+		t.Fatal(err)
+	}
+	view, err := svc.RoomView("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !view.CanManageAI {
+		t.Fatalf("expected joined unseated participant to manage AI, got %+v", view)
+	}
+	seats := seatsByID(view.Seats)
+	if seats[2].Type != model.SeatTypeAI {
+		t.Fatalf("expected P2 to contain AI, got %+v", seats[2])
+	}
+	if err := svc.RemoveAI("alice", 2); err != nil {
+		t.Fatal(err)
+	}
+	view, err = svc.RoomView("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seats = seatsByID(view.Seats)
+	if seats[2].Type != model.SeatTypeEmpty {
+		t.Fatalf("expected P2 AI to be removed, got %+v", seats[2])
+	}
+}
+
+func TestReadyParticipantCannotManageAI(t *testing.T) {
+	svc := NewService(store.NewMemoryStore(), rules.NewEngine())
+
+	svc.roomMu.Lock()
+	svc.room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Online: true}
+	svc.room.Seats[1] = &roomSeat{Type: model.SeatTypeHuman, Token: "alice", Ready: true}
+	svc.roomMu.Unlock()
+
+	if err := svc.PlaceAI("alice", 2); err == nil {
+		t.Fatal("expected ready participant not to place AI")
+	}
+	view, err := svc.RoomView("alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.CanManageAI {
+		t.Fatalf("expected ready participant not to manage AI, got %+v", view)
+	}
+}
+
+func TestAllAISeatsDoNotStartRoomGame(t *testing.T) {
+	svc := NewService(store.NewMemoryStore(), rules.NewEngine())
+
+	svc.roomMu.Lock()
+	svc.room.Participants["host"] = &roomParticipant{Token: "host", Name: "Host", Online: true}
+	svc.roomMu.Unlock()
+
+	for _, playerID := range model.PlayerOrder {
+		if err := svc.PlaceAI("host", playerID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	view, err := svc.RoomView("host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Status != model.RoomStatusWaiting || view.GameID != "" {
+		t.Fatalf("all-AI room should not start automatically, got %+v", view)
 	}
 }
 

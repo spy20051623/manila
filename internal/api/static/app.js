@@ -19,17 +19,17 @@ async function api(path, options = {}) {
 async function newGame() {
   const seedValue = $("seed").value.trim();
   const body = seedValue ? { seed: Number(seedValue) } : {};
-  const created = await api("/games", { method: "POST", body: JSON.stringify(body) });
+  const created = await api("/debug/games", { method: "POST", body: JSON.stringify(body) });
   gameId = created.game.gameId;
   localStorage.setItem("manilaGameId", gameId);
-  await api(`/games/${gameId}/start`, { method: "POST" });
+  await api(`/debug/games/${gameId}/start`, { method: "POST" });
   await refresh();
   await maybeAutoAI();
 }
 
 async function refresh(options = {}) {
   if (!gameId) return renderEmpty();
-  const data = await api(`/games/${gameId}/state`);
+  const data = await api(`/debug/games/${gameId}/state`);
   state = data.game;
   render();
   if (options.auto !== false) {
@@ -39,7 +39,7 @@ async function refresh(options = {}) {
 
 async function legalActions() {
   if (!state || !state.currentPlayer) return [];
-  const data = await api(`/games/${gameId}/players/${state.currentPlayer}/actions`);
+  const data = await api(`/debug/games/${gameId}/players/${state.currentPlayer}/actions`);
   return data.actions || [];
 }
 
@@ -52,7 +52,7 @@ async function applyAction(action) {
     payload: actionPayload,
     expectedEventSeq: state.eventSeq,
   };
-  await api(`/games/${gameId}/actions`, { method: "POST", body: JSON.stringify(requestBody) });
+  await api(`/debug/games/${gameId}/actions`, { method: "POST", body: JSON.stringify(requestBody) });
   await refresh();
 }
 
@@ -62,7 +62,7 @@ async function aiStep() {
   aiBusy = true;
   try {
     const playerId = Number(state.currentPlayer);
-    await api(`/games/${gameId}/players/${playerId}/trained-ai`, { method: "POST" });
+    await api(`/debug/games/${gameId}/players/${playerId}/trained-ai`, { method: "POST" });
     await refresh({ auto: false });
   } finally {
     aiBusy = false;
@@ -71,8 +71,8 @@ async function aiStep() {
 }
 
 async function aiStepInternal() {
-  await api(`/games/${gameId}/players/${state.currentPlayer}/trained-ai`, { method: "POST" });
-  const data = await api(`/games/${gameId}/state`);
+  await api(`/debug/games/${gameId}/players/${state.currentPlayer}/trained-ai`, { method: "POST" });
+  const data = await api(`/debug/games/${gameId}/state`);
   state = data.game;
   render();
 }

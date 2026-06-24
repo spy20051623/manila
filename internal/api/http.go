@@ -22,21 +22,29 @@ import (
 var staticFiles embed.FS
 
 type Handler struct {
-	service   *app.Service
-	clientsMu sync.Mutex
-	clients   map[*websocket.Conn]string
-	upgrader  websocket.Upgrader
+	service     *app.Service
+	clientsMu   sync.Mutex
+	clients     map[*websocket.Conn]string
+	gameClients map[*websocket.Conn]gameClient
+	upgrader    websocket.Upgrader
+}
+
+type gameClient struct {
+	GameID string
+	Token  string
 }
 
 func NewHandler(s *app.Service) *Handler {
 	h := &Handler{
-		service: s,
-		clients: map[*websocket.Conn]string{},
+		service:     s,
+		clients:     map[*websocket.Conn]string{},
+		gameClients: map[*websocket.Conn]gameClient{},
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
 	}
 	s.SetNotifier(h.broadcastRoom)
+	s.SetGameNotifier(h.broadcastGame)
 	return h
 }
 
@@ -46,6 +54,7 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/room/", h.handleRoomPath)
 	mux.HandleFunc("/games", h.handleGames)
 	mux.HandleFunc("/games/", h.handleGamePath)
+	mux.HandleFunc("/debug/games", h.handleDebugGames)
 	mux.HandleFunc("/debug/games/", h.handleDebugPath)
 	mux.HandleFunc("/training/random-games", h.handleTrainingRandomGames)
 	mux.HandleFunc("/training/evaluate-genome", h.handleTrainingEvaluateGenome)
@@ -65,6 +74,8 @@ func remapStaticPages(next http.Handler) http.Handler {
 		switch r.URL.Path {
 		case "/debug", "/debug/", "/debug.html":
 			r = requestWithPath(r, "/debug.html")
+		case "/game", "/game/":
+			r = requestWithPath(r, "/game.html")
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -220,14 +231,15 @@ func (h *Handler) roomViewForToken(token string) model.RoomView {
 	if err != nil {
 		return model.RoomView{Status: model.RoomStatusWaiting}
 	}
-	view.Game = h.visibleGameForToken(token, view.Game)
-	if view.Game != nil {
-		view.EventSeq = view.Game.EventSeq
-	}
+	view.Game = nil
+	view.EventSeq = 0
 	return view
 }
 
 func (h *Handler) visibleGameForToken(token string, g *model.Game) *model.Game {
+	if g != nil && g.Status == model.StatusEnded {
+		return gameVisibleToViewer(g, 0)
+	}
 	return gameVisibleToViewer(g, h.service.RoomPlayerID(token))
 }
 
@@ -274,6 +286,66 @@ func (h *Handler) broadcastRoom() {
 	}
 }
 
+func (h *Handler) handleGameWS(w http.ResponseWriter, r *http.Request, gameID string) {
+	token := r.URL.Query().Get("token")
+	conn, err := h.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	h.clientsMu.Lock()
+	h.gameClients[conn] = gameClient{GameID: gameID, Token: token}
+	h.clientsMu.Unlock()
+	if payload, ok := h.gamePayloadForToken(gameID, token); ok {
+		_ = conn.WriteJSON(payload)
+	}
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
+			break
+		}
+	}
+	h.clientsMu.Lock()
+	delete(h.gameClients, conn)
+	h.clientsMu.Unlock()
+	_ = conn.Close()
+}
+
+func (h *Handler) broadcastGame(gameID string) {
+	h.clientsMu.Lock()
+	clients := map[*websocket.Conn]gameClient{}
+	for conn, client := range h.gameClients {
+		if client.GameID == gameID {
+			clients[conn] = client
+		}
+	}
+	h.clientsMu.Unlock()
+	for conn, client := range clients {
+		payload, ok := h.gamePayloadForToken(client.GameID, client.Token)
+		if !ok {
+			continue
+		}
+		_ = conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		if err := conn.WriteJSON(payload); err != nil {
+			h.clientsMu.Lock()
+			delete(h.gameClients, conn)
+			h.clientsMu.Unlock()
+			_ = conn.Close()
+		}
+	}
+}
+
+func (h *Handler) gamePayloadForToken(gameID string, token string) (map[string]interface{}, bool) {
+	g, err := h.service.GetGame(gameID)
+	if err != nil {
+		return nil, false
+	}
+	visible := h.gameVisibleForToken(gameID, token, g)
+	return map[string]interface{}{
+		"game":     visible,
+		"eventSeq": visible.EventSeq,
+		"playerId": h.service.GamePlayerID(token, gameID),
+	}, true
+}
+
 func (h *Handler) handleGamePath(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	if len(parts) < 2 || parts[0] != "games" {
@@ -296,7 +368,64 @@ func (h *Handler) handleGamePath(w http.ResponseWriter, r *http.Request) {
 		respondGameForRequest(w, r, g, err)
 	case len(parts) == 3 && parts[2] == "state" && r.Method == http.MethodGet:
 		g, err := h.service.GetGame(gameID)
-		respondGameForRequest(w, r, g, err)
+		h.respondTokenGame(w, r, gameID, g, err)
+	case len(parts) == 3 && parts[2] == "actions" && r.Method == http.MethodGet:
+		playerID, err := h.playerIDForGameAction(r, gameID)
+		if err != nil {
+			writeError(w, http.StatusForbidden, "forbidden", err.Error())
+			return
+		}
+		actions, seq, err := h.service.LegalActions(gameID, playerID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "badRequest", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"actions": actions, "eventSeq": seq, "playerId": playerID})
+	case len(parts) == 3 && parts[2] == "actions" && r.Method == http.MethodPost:
+		var action model.Action
+		if err := json.NewDecoder(r.Body).Decode(&action); err != nil {
+			writeError(w, http.StatusBadRequest, "badJson", err.Error())
+			return
+		}
+		playerID, err := h.playerIDForGameAction(r, gameID)
+		if err != nil || action.PlayerID != playerID {
+			writeError(w, http.StatusForbidden, "forbidden", "token cannot act for player")
+			return
+		}
+		g, err := h.service.ApplyAction(gameID, action)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "badRequest", err.Error())
+			return
+		}
+		if g.Status == model.StatusEnded {
+			_ = h.service.FinishActiveRoomGame(g)
+		}
+		h.broadcastGame(gameID)
+		h.writeTokenGame(w, r, gameID, g)
+	case len(parts) == 3 && parts[2] == "ai-step" && r.Method == http.MethodPost:
+		if _, err := h.playerIDForGameAction(r, gameID); err != nil {
+			writeError(w, http.StatusForbidden, "forbidden", err.Error())
+			return
+		}
+		g, action, err := h.service.RoomAIStep(tokenFromRequest(r))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "badRequest", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"game": h.gameVisibleForToken(gameID, tokenFromRequest(r), g), "action": action, "eventSeq": g.EventSeq})
+	case len(parts) == 3 && parts[2] == "ai-round" && r.Method == http.MethodPost:
+		if _, err := h.playerIDForGameAction(r, gameID); err != nil {
+			writeError(w, http.StatusForbidden, "forbidden", err.Error())
+			return
+		}
+		g, err := h.service.RoomAIRound(tokenFromRequest(r))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "badRequest", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"game": h.gameVisibleForToken(gameID, tokenFromRequest(r), g), "eventSeq": g.EventSeq})
+	case len(parts) == 3 && parts[2] == "ws" && r.Method == http.MethodGet:
+		h.handleGameWS(w, r, gameID)
 	case len(parts) == 3 && parts[2] == "events" && r.Method == http.MethodGet:
 		events, seq, err := h.service.Events(gameID)
 		if err != nil {
@@ -310,8 +439,9 @@ func (h *Handler) handleGamePath(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "badRequest", "invalid player id")
 			return
 		}
-		if viewerID := viewerIDFromRequest(r); viewerID != 0 && viewerID != playerID {
-			writeError(w, http.StatusForbidden, "forbidden", "viewer cannot inspect another player's actions")
+		tokenPlayerID, err := h.playerIDForGameAction(r, gameID)
+		if err != nil || tokenPlayerID != playerID {
+			writeError(w, http.StatusForbidden, "forbidden", "token cannot inspect this player's actions")
 			return
 		}
 		actions, seq, err := h.service.LegalActions(gameID, playerID)
@@ -320,22 +450,15 @@ func (h *Handler) handleGamePath(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{"actions": actions, "eventSeq": seq})
-	case len(parts) == 3 && parts[2] == "actions" && r.Method == http.MethodPost:
-		var action model.Action
-		if err := json.NewDecoder(r.Body).Decode(&action); err != nil {
-			writeError(w, http.StatusBadRequest, "badJson", err.Error())
-			return
-		}
-		if viewerID := viewerIDFromRequest(r); viewerID != 0 && viewerID != action.PlayerID {
-			writeError(w, http.StatusForbidden, "forbidden", "viewer cannot act for another player")
-			return
-		}
-		g, err := h.service.ApplyAction(gameID, action)
-		respondGameForRequest(w, r, g, err)
 	case len(parts) == 5 && parts[2] == "players" && parts[4] == "random-ai" && r.Method == http.MethodPost:
 		playerID, err := strconv.Atoi(parts[3])
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "badRequest", "invalid player id")
+			return
+		}
+		tokenPlayerID, err := h.playerIDForGameAction(r, gameID)
+		if err != nil || tokenPlayerID != playerID {
+			writeError(w, http.StatusForbidden, "forbidden", "token cannot act for player")
 			return
 		}
 		g, action, err := h.service.ApplyRandomAI(gameID, playerID)
@@ -343,6 +466,7 @@ func (h *Handler) handleGamePath(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "badRequest", err.Error())
 			return
 		}
+		h.broadcastGame(gameID)
 		writeJSON(w, http.StatusOK, map[string]interface{}{"game": visibleGameForRequest(r, g), "action": action, "eventSeq": g.EventSeq})
 	case len(parts) == 5 && parts[2] == "players" && parts[4] == "trained-ai" && r.Method == http.MethodPost:
 		playerID, err := strconv.Atoi(parts[3])
@@ -350,61 +474,222 @@ func (h *Handler) handleGamePath(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "badRequest", "invalid player id")
 			return
 		}
+		tokenPlayerID, err := h.playerIDForGameAction(r, gameID)
+		if err != nil || tokenPlayerID != playerID {
+			writeError(w, http.StatusForbidden, "forbidden", "token cannot act for player")
+			return
+		}
 		g, action, err := h.service.ApplyTrainedAI(gameID, playerID)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, "badRequest", err.Error())
 			return
 		}
+		h.broadcastGame(gameID)
 		writeJSON(w, http.StatusOK, map[string]interface{}{"game": visibleGameForRequest(r, g), "action": action, "eventSeq": g.EventSeq})
 	default:
 		writeError(w, http.StatusNotFound, "notFound", "not found")
 	}
 }
 
+func (h *Handler) handleDebugGames(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/debug/games" || r.Method != http.MethodPost {
+		writeError(w, http.StatusNotFound, "notFound", "not found")
+		return
+	}
+	var req struct {
+		Seed *int64 `json:"seed,omitempty"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	g := h.service.CreateGame(req.Seed)
+	writeJSON(w, http.StatusCreated, map[string]interface{}{"game": g, "eventSeq": g.EventSeq})
+}
+
 func (h *Handler) handleDebugPath(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(parts) != 4 || parts[0] != "debug" || parts[1] != "games" {
+	if len(parts) < 3 || parts[0] != "debug" || parts[1] != "games" {
 		writeError(w, http.StatusNotFound, "notFound", "not found")
 		return
 	}
 	gameID := parts[2]
-	switch parts[3] {
-	case "snapshot":
-		if r.Method != http.MethodPost {
+	if len(parts) == 3 {
+		if r.Method != http.MethodGet {
 			writeError(w, http.StatusMethodNotAllowed, "methodNotAllowed", "method not allowed")
 			return
 		}
 		g, err := h.service.GetGame(gameID)
 		respondGame(w, g, err)
-	case "reset":
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "methodNotAllowed", "method not allowed")
-			return
-		}
-		var req struct {
-			Seed *int64 `json:"seed,omitempty"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		g, err := h.service.ResetGame(gameID, req.Seed)
-		respondGame(w, g, err)
-	case "set-seed":
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, "methodNotAllowed", "method not allowed")
-			return
-		}
-		var req struct {
-			Seed int64 `json:"seed"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "badJson", err.Error())
-			return
-		}
-		g, err := h.service.SetSeed(gameID, req.Seed)
-		respondGame(w, g, err)
-	default:
-		writeError(w, http.StatusNotFound, "notFound", "not found")
+		return
 	}
+	if len(parts) == 4 {
+		switch parts[3] {
+		case "start":
+			if r.Method != http.MethodPost {
+				writeError(w, http.StatusMethodNotAllowed, "methodNotAllowed", "method not allowed")
+				return
+			}
+			g, err := h.service.StartGame(gameID)
+			respondGame(w, g, err)
+		case "state":
+			if r.Method != http.MethodGet {
+				writeError(w, http.StatusMethodNotAllowed, "methodNotAllowed", "method not allowed")
+				return
+			}
+			g, err := h.service.GetGame(gameID)
+			respondGame(w, g, err)
+		case "events":
+			if r.Method != http.MethodGet {
+				writeError(w, http.StatusMethodNotAllowed, "methodNotAllowed", "method not allowed")
+				return
+			}
+			events, seq, err := h.service.Events(gameID)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "badRequest", err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]interface{}{"events": events, "eventSeq": seq})
+		case "actions":
+			if r.Method != http.MethodPost {
+				writeError(w, http.StatusMethodNotAllowed, "methodNotAllowed", "method not allowed")
+				return
+			}
+			var action model.Action
+			if err := json.NewDecoder(r.Body).Decode(&action); err != nil {
+				writeError(w, http.StatusBadRequest, "badJson", err.Error())
+				return
+			}
+			g, err := h.service.ApplyAction(gameID, action)
+			respondGame(w, g, err)
+		case "snapshot":
+			if r.Method != http.MethodPost {
+				writeError(w, http.StatusMethodNotAllowed, "methodNotAllowed", "method not allowed")
+				return
+			}
+			g, err := h.service.GetGame(gameID)
+			respondGame(w, g, err)
+		case "reset":
+			if r.Method != http.MethodPost {
+				writeError(w, http.StatusMethodNotAllowed, "methodNotAllowed", "method not allowed")
+				return
+			}
+			var req struct {
+				Seed *int64 `json:"seed,omitempty"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			g, err := h.service.ResetGame(gameID, req.Seed)
+			respondGame(w, g, err)
+		case "set-seed":
+			if r.Method != http.MethodPost {
+				writeError(w, http.StatusMethodNotAllowed, "methodNotAllowed", "method not allowed")
+				return
+			}
+			var req struct {
+				Seed int64 `json:"seed"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeError(w, http.StatusBadRequest, "badJson", err.Error())
+				return
+			}
+			g, err := h.service.SetSeed(gameID, req.Seed)
+			respondGame(w, g, err)
+		default:
+			writeError(w, http.StatusNotFound, "notFound", "not found")
+		}
+		return
+	}
+	if len(parts) == 6 && parts[3] == "players" {
+		playerID, err := strconv.Atoi(parts[4])
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "badRequest", "invalid player id")
+			return
+		}
+		switch parts[5] {
+		case "actions":
+			if r.Method != http.MethodGet {
+				writeError(w, http.StatusMethodNotAllowed, "methodNotAllowed", "method not allowed")
+				return
+			}
+			actions, seq, err := h.service.LegalActions(gameID, playerID)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "badRequest", err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]interface{}{"actions": actions, "eventSeq": seq})
+		case "random-ai":
+			if r.Method != http.MethodPost {
+				writeError(w, http.StatusMethodNotAllowed, "methodNotAllowed", "method not allowed")
+				return
+			}
+			g, action, err := h.service.ApplyRandomAI(gameID, playerID)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "badRequest", err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]interface{}{"game": g, "action": action, "eventSeq": g.EventSeq})
+		case "trained-ai":
+			if r.Method != http.MethodPost {
+				writeError(w, http.StatusMethodNotAllowed, "methodNotAllowed", "method not allowed")
+				return
+			}
+			g, action, err := h.service.ApplyTrainedAI(gameID, playerID)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "badRequest", err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]interface{}{"game": g, "action": action, "eventSeq": g.EventSeq})
+		default:
+			writeError(w, http.StatusNotFound, "notFound", "not found")
+		}
+		return
+	}
+	writeError(w, http.StatusNotFound, "notFound", "not found")
 }
+
+func (h *Handler) respondTokenGame(w http.ResponseWriter, r *http.Request, gameID string, g *model.Game, err error) {
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "badRequest", err.Error())
+		return
+	}
+	h.writeTokenGame(w, r, gameID, g)
+}
+
+func (h *Handler) writeTokenGame(w http.ResponseWriter, r *http.Request, gameID string, g *model.Game) {
+	visible := h.gameVisibleForToken(gameID, tokenFromRequest(r), g)
+	playerID := h.service.GamePlayerID(tokenFromRequest(r), gameID)
+	writeJSON(w, http.StatusOK, map[string]interface{}{"game": visible, "eventSeq": visible.EventSeq, "playerId": playerID})
+}
+
+func (h *Handler) gameVisibleForToken(gameID string, token string, g *model.Game) *model.Game {
+	if g == nil {
+		return nil
+	}
+	if g.Status == model.StatusEnded {
+		return gameVisibleToViewer(g, 0)
+	}
+	return gameVisibleToViewer(g, h.service.GamePlayerID(token, gameID))
+}
+
+func (h *Handler) playerIDForGameAction(r *http.Request, gameID string) (int, error) {
+	g, err := h.service.GetGame(gameID)
+	if err != nil {
+		return 0, err
+	}
+	if g.Status == model.StatusEnded {
+		return 0, errGameEnded{}
+	}
+	playerID := h.service.GamePlayerID(tokenFromRequest(r), gameID)
+	if playerID == 0 || !h.service.IsActiveRoomGame(gameID) {
+		return 0, errForbiddenGameAction{}
+	}
+	return playerID, nil
+}
+
+type errForbiddenGameAction struct{}
+
+func (errForbiddenGameAction) Error() string { return "token cannot act in this game" }
+
+type errGameEnded struct{}
+
+func (errGameEnded) Error() string { return "game has ended" }
 
 func (h *Handler) handleTrainingRandomGames(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -518,6 +803,12 @@ func gameVisibleToViewer(g *model.Game, viewerID int) *model.Game {
 	var visible model.Game
 	if err := json.Unmarshal(data, &visible); err != nil {
 		return g
+	}
+	if visible.Status == model.StatusEnded {
+		for _, player := range visible.Players {
+			player.HiddenShareCount = 0
+		}
+		return &visible
 	}
 	publicBuys := publicBoughtShares(visible.Events)
 	for playerID, player := range visible.Players {

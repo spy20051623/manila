@@ -232,7 +232,7 @@ function clearRoomToken() {
   connectGameSocket();
 }
 
-function returnToLobby() {
+function returnToLobby(options = {}) {
   clearActiveAnimations(false);
   if (gameSocket) {
     gameSocket.onclose = null;
@@ -240,20 +240,20 @@ function returnToLobby() {
   }
   const url = new URL("/", window.location.origin);
   if (roomToken) url.searchParams.set("token", roomToken);
-  if (roomId) url.searchParams.set("room", roomId);
+  if (options.keepRoom !== false && roomId) url.searchParams.set("room", roomId);
   window.location.href = `${url.pathname}${url.search}`;
 }
 
 async function refresh(options = {}) {
   if (!gameId) {
-    returnToLobby();
+    returnToLobby({ keepRoom: false });
     return;
   }
   let data;
   try {
     data = await api(`/games/${encodeURIComponent(gameId)}/state`);
   } catch {
-    returnToLobby();
+    returnToLobby({ keepRoom: false });
     return;
   }
   clearActiveAnimations(false);
@@ -272,9 +272,11 @@ async function refresh(options = {}) {
 
 function roomFromGamePayload(data) {
   const game = data?.game || null;
-  if (data?.roomId) roomId = data.roomId;
+  roomId = data?.roomId || "";
   return {
     roomId,
+    name: data?.roomName || room?.name || "",
+    seats: Array.isArray(data?.seats) ? data.seats : (Array.isArray(room?.seats) ? room.seats : []),
     status: game ? "inProgress" : "waiting",
     gameId: game?.gameId || gameId,
     game,
@@ -1850,20 +1852,25 @@ function renderSettlementOverlay() {
       <div class="settlement-eyebrow">游戏结束</div>
       <section class="winner-block">
         <div class="winner-rank">第1名</div>
-        <div class="winner-player">P${winner.playerId}</div>
+        ${settlementPlayerNameHTML(winner.playerId, "winner-player")}
         <div class="winner-score">${winner.wealth} 分</div>
       </section>
       <section class="runner-list">
         ${others.map((score) => `
           <article class="runner-card">
             <div class="runner-rank">第${score.rank}名</div>
-            <div class="runner-player">P${score.playerId}</div>
+            ${settlementPlayerNameHTML(score.playerId, "runner-player")}
             <div class="runner-score">${score.wealth} 分</div>
           </article>
         `).join("")}
       </section>
     </div>`;
   overlay.querySelector(".settlement-close")?.addEventListener("click", closeSettlementOverlay);
+}
+
+function settlementPlayerNameHTML(playerId, className) {
+  const name = playerDisplayName(playerId);
+  return `<div class="${className}" title="${escapeAttr(name)}">${escapeHTML(name)}</div>`;
 }
 
 function closeSettlementOverlay() {

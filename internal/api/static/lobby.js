@@ -33,12 +33,7 @@ async function refresh() {
       const roomData = await api(`/rooms/${encodeURIComponent(selectedRoomId)}/state`);
       applyRoom(roomData.room || null);
     } catch (err) {
-      selectedRoomId = "";
-      room = null;
-      syncTokenToURL();
-      connectRoomSocket();
-      renderLobby();
-      showError(err);
+      leaveRoomView();
     }
   } else {
     room = null;
@@ -54,10 +49,7 @@ function applyLobby(nextLobby) {
     syncTokenToURL();
   }
   if (selectedRoomId && lobby && !lobby.rooms?.some((item) => item.roomId === selectedRoomId)) {
-    selectedRoomId = "";
-    room = null;
-    syncTokenToURL();
-    connectRoomSocket();
+    leaveRoomView();
     showToast("房间已关闭");
   }
   renderLobby();
@@ -361,6 +353,10 @@ async function adminCloseRoom(roomID) {
 }
 
 function backToLobby() {
+  leaveRoomView();
+}
+
+function leaveRoomView() {
   selectedRoomId = "";
   room = null;
   syncTokenToURL();

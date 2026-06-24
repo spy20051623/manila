@@ -588,9 +588,7 @@ func (h *Handler) gamePayloadForToken(gameID string, token string) (map[string]i
 		"eventSeq": visible.EventSeq,
 		"playerId": h.service.GamePlayerID(token, gameID),
 	}
-	if roomID, err := h.service.RoomIDForGame(gameID); err == nil {
-		payload["roomId"] = roomID
-	}
+	h.addRoomContextToGamePayload(payload, gameID, token)
 	return payload, true
 }
 
@@ -907,13 +905,22 @@ func (h *Handler) respondTokenGame(w http.ResponseWriter, r *http.Request, gameI
 }
 
 func (h *Handler) writeTokenGame(w http.ResponseWriter, r *http.Request, gameID string, g *model.Game) {
-	visible := h.gameVisibleForToken(gameID, tokenFromRequest(r), g)
-	playerID := h.service.GamePlayerID(tokenFromRequest(r), gameID)
+	token := tokenFromRequest(r)
+	visible := h.gameVisibleForToken(gameID, token, g)
+	playerID := h.service.GamePlayerID(token, gameID)
 	payload := map[string]interface{}{"game": visible, "eventSeq": visible.EventSeq, "playerId": playerID}
-	if roomID, err := h.service.RoomIDForGame(gameID); err == nil {
-		payload["roomId"] = roomID
-	}
+	h.addRoomContextToGamePayload(payload, gameID, token)
 	writeJSON(w, http.StatusOK, payload)
+}
+
+func (h *Handler) addRoomContextToGamePayload(payload map[string]interface{}, gameID string, token string) {
+	roomID, roomName, seats, err := h.service.RoomContextForGame(gameID, token)
+	if err != nil {
+		return
+	}
+	payload["roomId"] = roomID
+	payload["roomName"] = roomName
+	payload["seats"] = seats
 }
 
 func (h *Handler) gameVisibleForToken(gameID string, token string, g *model.Game) *model.Game {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"manila/internal/app"
+	"manila/internal/model"
 	"manila/internal/rules"
 	"manila/internal/store"
 )
@@ -118,7 +119,8 @@ func TestHTTPTrainedAI(t *testing.T) {
 }
 
 func TestRoomJoinSeatsStartAndObserverVisibility(t *testing.T) {
-	svc := app.NewService(store.NewMemoryStore(), rules.NewEngine())
+	st := store.NewMemoryStore()
+	svc := app.NewService(st, rules.NewEngine())
 	h := NewHandler(svc)
 	mux := http.NewServeMux()
 	h.Register(mux)
@@ -138,6 +140,10 @@ func TestRoomJoinSeatsStartAndObserverVisibility(t *testing.T) {
 	}
 	gameID := room["gameId"].(string)
 	ownState := roomRequest(t, mux, http.MethodGet, "/games/"+gameID+"/state", token, nil)
+	stateSeats := ownState["seats"].([]interface{})
+	if stateSeats[0].(map[string]interface{})["name"] != "Alice" {
+		t.Fatalf("game state should include room seat names, got %s", ownState)
+	}
 	ownGame := ownState["game"].(map[string]interface{})
 	ownPlayers := ownGame["players"].(map[string]interface{})
 	ownP1 := ownPlayers["1"].(map[string]interface{})
@@ -167,6 +173,27 @@ func TestRoomJoinSeatsStartAndObserverVisibility(t *testing.T) {
 	allowed := roomRequest(t, mux, http.MethodGet, "/games/"+gameID+"/actions", token, nil)
 	if len(allowed["actions"].([]interface{})) == 0 {
 		t.Fatalf("expected seated token to receive actions, got %s", allowed)
+	}
+
+	ref, ok := st.Get(gameID)
+	if !ok {
+		t.Fatalf("expected game %s in store", gameID)
+	}
+	ref.Mu.Lock()
+	ref.Game.Status = model.StatusEnded
+	endedGame := ref.Game
+	ref.Mu.Unlock()
+	svc.FinishActiveRoomGame(endedGame)
+	endedState := roomRequest(t, mux, http.MethodGet, "/games/"+gameID+"/state", token, nil)
+	endedSeats := endedState["seats"].([]interface{})
+	if endedSeats[0].(map[string]interface{})["name"] != "Alice" {
+		t.Fatalf("ended game state should keep room seat names, got %s", endedState)
+	}
+	roomRequest(t, mux, http.MethodPatch, "/lobby/name", token, bytes.NewBufferString(`{"name":"Carol"}`))
+	renamedState := roomRequest(t, mux, http.MethodGet, "/games/"+gameID+"/state", token, nil)
+	renamedSeats := renamedState["seats"].([]interface{})
+	if renamedSeats[0].(map[string]interface{})["name"] != "Carol" {
+		t.Fatalf("ended game state should resolve current participant names by token, got %s", renamedState)
 	}
 }
 

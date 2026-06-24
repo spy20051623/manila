@@ -28,6 +28,7 @@ type Service struct {
 	participants  map[string]*roomParticipant
 	rooms         map[string]*roomState
 	gameRooms     map[string]string
+	gameSnapshots map[string]gameRoomSnapshot
 	nextRoom      int
 	adminToken    string
 	room          roomState
@@ -48,6 +49,7 @@ func NewService(st *store.MemoryStore, eng *rules.Engine) *Service {
 		participants:  map[string]*roomParticipant{},
 		rooms:         map[string]*roomState{},
 		gameRooms:     map[string]string{},
+		gameSnapshots: map[string]gameRoomSnapshot{},
 		nextRoom:      2,
 		adminToken:    adminToken,
 		room:          defaultRoom,

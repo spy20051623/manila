@@ -110,7 +110,7 @@ body {
   background: rgba(255, 248, 232, 0.72);
   font-size: 13px;
   font-weight: 800;
-  line-height: 1;
+  line-height: 1.25;
   text-align: center;
   white-space: nowrap;
 }
@@ -193,7 +193,7 @@ body {
   color: #fff8e8;
   font-size: 12px;
   font-weight: 900;
-  line-height: 1;
+  line-height: 1.25;
   text-align: center;
   white-space: nowrap;
   background: #6d7f4f;
@@ -511,7 +511,7 @@ input {
 .brand h1 {
   margin: 0;
   font-size: 23px;
-  line-height: 1;
+  line-height: 1.2;
   letter-spacing: 0;
 }
 
@@ -621,7 +621,7 @@ input {
 .compact-heading h2 {
   margin: 0;
   font-size: 18px;
-  line-height: 1.08;
+  line-height: 1.24;
 }
 
 .compact-heading h2,
@@ -1195,7 +1195,7 @@ input {
     0 2px 5px rgba(35, 20, 10, 0.28);
   font-size: 12px;
   font-weight: 900;
-  line-height: 1;
+  line-height: 1.2;
   text-align: center;
 }
 
@@ -1275,7 +1275,7 @@ input {
   min-width: 0;
   font-weight: 900;
   font-size: 16px;
-  line-height: 1;
+  line-height: 1.25;
 }
 
 .player-title {
@@ -1285,13 +1285,17 @@ input {
   min-width: 0;
   max-width: 138px;
   color: #17110c;
+  line-height: 1.35;
 }
 
 .player-display-name {
+  display: block;
   min-width: 0;
   overflow: hidden;
+  padding-block: 1px 2px;
   text-overflow: ellipsis;
   white-space: nowrap;
+  line-height: 1.35;
 }
 
 .player-stats,
@@ -1511,7 +1515,7 @@ input {
   margin: 0;
   color: #4a2c18;
   font-size: 15px;
-  line-height: 1.15;
+  line-height: 1.28;
 }
 
 .inline-controls {
@@ -1759,7 +1763,7 @@ input {
   margin: -8px 36px 2px 0;
   color: #342010;
   font-size: 24px;
-  line-height: 1.15;
+  line-height: 1.25;
 }
 
 .name-dialog-field {
@@ -1889,7 +1893,7 @@ input {
   border-radius: 50%;
   color: #4a2609;
   font-size: 45px;
-  line-height: 1;
+  line-height: 1.15;
   background: linear-gradient(135deg, #fff2a6, #d69a29 58%, #8f5513);
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.38);
   transform: translateX(-50%);
@@ -1910,15 +1914,19 @@ input {
   color: #ffe88f;
   font-size: 36px;
   font-weight: 950;
-  line-height: 1.05;
+  line-height: 1.18;
 }
 
 .winner-player {
   margin-top: 4px;
+  max-width: 100%;
+  overflow: hidden;
   color: #fffdf1;
   font-size: 86px;
   font-weight: 950;
-  line-height: 0.98;
+  line-height: 1.14;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   text-shadow: 0 4px 12px rgba(0, 0, 0, 0.42);
 }
 
@@ -1950,10 +1958,13 @@ input {
 
 .runner-player {
   margin-top: 6px;
+  overflow: hidden;
   color: #fff9e4;
   font-size: 42px;
   font-weight: 950;
-  line-height: 1;
+  line-height: 1.14;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .runner-score {

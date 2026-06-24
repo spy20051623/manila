@@ -63,6 +63,19 @@ type roomState struct {
 	offlineTimers        map[string]*time.Timer
 }
 
+type gameRoomSnapshot struct {
+	RoomID string
+	Name   string
+	Seats  []gameSeatSnapshot
+}
+
+type gameSeatSnapshot struct {
+	PlayerID int
+	Type     model.SeatType
+	Token    string
+	Name     string
+}
+
 func newRoomState(id string, name string, ownerToken string) roomState {
 	seats := map[int]*roomSeat{}
 	for _, playerID := range model.PlayerOrder {
@@ -1173,6 +1186,7 @@ func (s *Service) finishEndedRoomGameLocked(room *roomState, g *model.Game) {
 		room.closeTimer.Stop()
 		room.closeTimer = nil
 	}
+	s.snapshotRoomForGameLocked(room, room.ActiveGameID)
 	delete(s.gameRooms, room.ActiveGameID)
 	room.Status = model.RoomStatusWaiting
 	room.ActiveGameID = ""
@@ -1205,6 +1219,7 @@ func (s *Service) AdminCloseRoom(roomID string, token string) error {
 	}
 	s.stopAllOfflineReleasesLocked(room)
 	if room.ActiveGameID != "" {
+		s.snapshotRoomForGameLocked(room, room.ActiveGameID)
 		delete(s.gameRooms, room.ActiveGameID)
 	}
 	room.Closed = true
@@ -1212,6 +1227,37 @@ func (s *Service) AdminCloseRoom(roomID string, token string) error {
 	s.roomMu.Unlock()
 	s.emitRoomChange()
 	return nil
+}
+
+func (s *Service) snapshotRoomForGameLocked(room *roomState, gameID string) {
+	if room == nil || gameID == "" {
+		return
+	}
+	s.gameSnapshots[gameID] = gameRoomSnapshot{
+		RoomID: room.ID,
+		Name:   room.Name,
+		Seats:  s.roomSeatSnapshotsLocked(room),
+	}
+}
+
+func (s *Service) roomSeatSnapshotsLocked(room *roomState) []gameSeatSnapshot {
+	seats := make([]gameSeatSnapshot, 0, len(model.PlayerOrder))
+	for _, id := range model.PlayerOrder {
+		seat := room.Seats[id]
+		name := ""
+		if seat.Type == model.SeatTypeHuman {
+			if participant := s.participantForSeatLocked(room, seat.Token); participant != nil {
+				name = participant.Name
+			}
+		}
+		seats = append(seats, gameSeatSnapshot{
+			PlayerID: id,
+			Type:     seat.Type,
+			Token:    seat.Token,
+			Name:     name,
+		})
+	}
+	return seats
 }
 
 func (s *Service) scheduleOfflineReleaseLocked(room *roomState, token string) {
@@ -1290,25 +1336,7 @@ func (s *Service) roomViewLocked(roomID string, token string) model.RoomView {
 		HumanPlayerCount: s.humanPlayerCountLocked(room),
 	}
 	view.Participant.PlayerID = playerID
-	for _, id := range model.PlayerOrder {
-		seat := room.Seats[id]
-		seatName := ""
-		seatOnline := true
-		if seat.Type == model.SeatTypeHuman {
-			if participant := s.participantForSeatLocked(room, seat.Token); participant != nil {
-				seatName = participant.Name
-				seatOnline = participant.Online
-			}
-		}
-		view.Seats = append(view.Seats, model.RoomSeat{
-			PlayerID: id,
-			Type:     seat.Type,
-			Name:     seatName,
-			Ready:    seat.Ready,
-			Online:   seatOnline,
-			IsYou:    playerID == id,
-		})
-	}
+	view.Seats = s.roomSeatsViewLocked(room, token)
 	if room.Status == model.RoomStatusClosing && !room.CloseAt.IsZero() {
 		remaining := int(time.Until(room.CloseAt).Seconds())
 		if remaining < 0 {
@@ -1327,6 +1355,31 @@ func (s *Service) roomViewLocked(roomID string, token string) model.RoomView {
 	}
 	view.CanAIForCurrent = s.canAIForCurrentLocked(room, playerID)
 	return view
+}
+
+func (s *Service) roomSeatsViewLocked(room *roomState, token string) []model.RoomSeat {
+	seats := make([]model.RoomSeat, 0, len(model.PlayerOrder))
+	playerID := s.playerIDForTokenLocked(room, token)
+	for _, id := range model.PlayerOrder {
+		seat := room.Seats[id]
+		seatName := ""
+		seatOnline := true
+		if seat.Type == model.SeatTypeHuman {
+			if participant := s.participantForSeatLocked(room, seat.Token); participant != nil {
+				seatName = participant.Name
+				seatOnline = participant.Online
+			}
+		}
+		seats = append(seats, model.RoomSeat{
+			PlayerID: id,
+			Type:     seat.Type,
+			Name:     seatName,
+			Ready:    seat.Ready,
+			Online:   seatOnline,
+			IsYou:    playerID == id,
+		})
+	}
+	return seats
 }
 
 func (s *Service) participantViewLocked(token string, roomID string) model.RoomParticipant {
@@ -1513,6 +1566,41 @@ func (s *Service) RoomIDForGame(gameID string) (string, error) {
 		return "", fmt.Errorf("room not found for game")
 	}
 	return room.ID, nil
+}
+
+func (s *Service) RoomContextForGame(gameID string, token string) (string, string, []model.RoomSeat, error) {
+	s.roomMu.Lock()
+	defer s.roomMu.Unlock()
+	if room := s.roomForGameLocked(gameID); room != nil && !room.Closed {
+		return room.ID, room.Name, s.roomSeatsViewLocked(room, token), nil
+	}
+	if snapshot, ok := s.gameSnapshots[gameID]; ok {
+		return snapshot.RoomID, snapshot.Name, s.snapshotSeatsViewLocked(snapshot, token), nil
+	}
+	return "", "", nil, fmt.Errorf("room not found for game")
+}
+
+func (s *Service) snapshotSeatsViewLocked(snapshot gameRoomSnapshot, token string) []model.RoomSeat {
+	seats := make([]model.RoomSeat, 0, len(snapshot.Seats))
+	for _, seat := range snapshot.Seats {
+		name := seat.Name
+		online := true
+		if seat.Type == model.SeatTypeHuman {
+			if participant := s.participantByTokenLocked(seat.Token); participant != nil {
+				name = participant.Name
+				online = participant.Online
+			}
+		}
+		seats = append(seats, model.RoomSeat{
+			PlayerID: seat.PlayerID,
+			Type:     seat.Type,
+			Name:     name,
+			Ready:    true,
+			Online:   online,
+			IsYou:    token != "" && token == seat.Token,
+		})
+	}
+	return seats
 }
 
 func (s *Service) emitRoomChange() {

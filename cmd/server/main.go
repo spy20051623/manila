@@ -17,6 +17,7 @@ func main() {
 	engine := rules.NewEngine()
 	service := app.NewService(st, engine)
 	handler := api.NewHandler(service)
+	log.Println("manila admin token: " + service.AdminToken())
 
 	mux := http.NewServeMux()
 	handler.Register(mux)

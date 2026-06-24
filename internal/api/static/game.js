@@ -1,4 +1,5 @@
 let gameId = new URLSearchParams(window.location.search).get("game") || "";
+let roomId = new URLSearchParams(window.location.search).get("room") || "";
 let room = null;
 let roomToken = new URLSearchParams(window.location.search).get("token") || localStorage.getItem("manilaRoomToken") || "";
 if (roomToken) localStorage.setItem("manilaRoomToken", roomToken);
@@ -215,9 +216,11 @@ function getLocalPlayerId() {
 }
 
 function syncTokenToURL() {
-  if (!roomToken) return;
   const url = new URL(window.location.href);
-  url.searchParams.set("token", roomToken);
+  if (roomToken) url.searchParams.set("token", roomToken);
+  else url.searchParams.delete("token");
+  if (roomId) url.searchParams.set("room", roomId);
+  else url.searchParams.delete("room");
   window.history.replaceState({}, "", url);
 }
 
@@ -225,9 +228,7 @@ function clearRoomToken() {
   if (!roomToken) return;
   roomToken = "";
   localStorage.removeItem("manilaRoomToken");
-  const url = new URL(window.location.href);
-  url.searchParams.delete("token");
-  window.history.replaceState({}, "", url);
+  syncTokenToURL();
   connectGameSocket();
 }
 
@@ -237,8 +238,10 @@ function returnToLobby() {
     gameSocket.onclose = null;
     gameSocket.close();
   }
-  const tokenParam = roomToken ? `?token=${encodeURIComponent(roomToken)}` : "";
-  window.location.href = `/${tokenParam}`;
+  const url = new URL("/", window.location.origin);
+  if (roomToken) url.searchParams.set("token", roomToken);
+  if (roomId) url.searchParams.set("room", roomId);
+  window.location.href = `${url.pathname}${url.search}`;
 }
 
 async function refresh(options = {}) {
@@ -269,7 +272,9 @@ async function refresh(options = {}) {
 
 function roomFromGamePayload(data) {
   const game = data?.game || null;
+  if (data?.roomId) roomId = data.roomId;
   return {
+    roomId,
     status: game ? "inProgress" : "waiting",
     gameId: game?.gameId || gameId,
     game,
@@ -294,6 +299,7 @@ function lockFinishedGame() {
 
 async function applyRoomPayload(nextRoom, options = {}) {
   const animate = Boolean(options.animate);
+  if (nextRoom?.roomId) roomId = nextRoom.roomId;
   const nextEvents = eventRecordsFromGame(nextRoom?.game || null);
   if (isDuplicateInGamePayload(nextRoom)) {
     if (animate) {

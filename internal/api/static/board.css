@@ -94,11 +94,25 @@ body {
   margin-bottom: 18px;
 }
 
+.lobby-head > div:first-child {
+  min-width: 0;
+}
+
 .lobby-head p {
-  margin: 0 0 4px;
-  color: var(--muted);
+  display: inline-grid;
+  place-items: center;
+  min-height: 28px;
+  margin: 0 0 7px;
+  border: 1px solid rgba(31, 37, 40, 0.14);
+  border-radius: 999px;
+  padding: 0 12px;
+  color: #604829;
+  background: rgba(255, 248, 232, 0.72);
   font-size: 13px;
   font-weight: 800;
+  line-height: 1;
+  text-align: center;
+  white-space: nowrap;
 }
 
 .lobby-head h1 {
@@ -110,6 +124,8 @@ body {
 .lobby-identity {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 10px;
   color: var(--muted);
   font-weight: 800;
@@ -117,6 +133,78 @@ body {
 
 .lobby-seat-zone {
   position: relative;
+}
+
+.room-list-section {
+  margin-bottom: 18px;
+}
+
+.room-list {
+  display: grid;
+  gap: 10px;
+}
+
+.room-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid rgba(31, 37, 40, 0.18);
+  border-radius: 8px;
+  padding: 14px;
+  background: #fff8e8;
+  box-shadow: inset 0 -12px 20px rgba(93, 58, 27, 0.08);
+}
+
+.room-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 18px;
+  font-weight: 950;
+}
+
+.room-card-meta {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.room-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.room-card-actions button {
+  min-height: 34px;
+  padding: 7px 12px;
+  white-space: nowrap;
+}
+
+.room-status-pill {
+  display: inline-grid;
+  place-items: center;
+  min-width: 68px;
+  min-height: 30px;
+  border-radius: 999px;
+  padding: 0 10px;
+  color: #fff8e8;
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1;
+  text-align: center;
+  white-space: nowrap;
+  background: #6d7f4f;
+}
+
+.room-status-pill.inProgress {
+  background: #9b6b2d;
+}
+
+.room-status-pill.closing {
+  background: #9b3e32;
 }
 
 .lobby-seats {
@@ -137,6 +225,17 @@ body {
 .lobby-seat.you {
   border-color: rgba(215, 166, 66, 0.85);
   box-shadow: 0 0 0 3px rgba(215, 166, 66, 0.22), inset 0 -12px 20px rgba(93, 58, 27, 0.08);
+}
+
+.lobby-seat.human {
+  border-color: rgba(47, 125, 143, 0.34);
+  background: #e8f1f2;
+  box-shadow: inset 0 -12px 20px rgba(47, 125, 143, 0.08);
+}
+
+.lobby-seat.human.you {
+  border-color: rgba(215, 166, 66, 0.9);
+  box-shadow: 0 0 0 3px rgba(215, 166, 66, 0.24), inset 0 -12px 20px rgba(47, 125, 143, 0.08);
 }
 
 .lobby-seat.ai {
@@ -296,8 +395,26 @@ body {
     flex-direction: column;
   }
 
+  .lobby-identity {
+    justify-content: flex-start;
+  }
+
   .lobby-seats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .room-card,
+  .room-card-actions {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .room-card-actions {
+    display: grid;
+  }
+
+  .room-status-pill {
+    width: 100%;
   }
 
   .completed-games-head,

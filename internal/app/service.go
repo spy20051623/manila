@@ -25,22 +25,41 @@ type Service struct {
 	aiMu          sync.Mutex
 	aiAssignments map[string]map[int]ai.Genome
 	roomMu        sync.Mutex
+	participants  map[string]*roomParticipant
+	rooms         map[string]*roomState
+	gameRooms     map[string]string
+	nextRoom      int
+	adminToken    string
 	room          roomState
 	notify        func()
 	notifyGame    func(string)
-	timeoutTimer  *time.Timer
-	closeTimer    *time.Timer
-	offlineTimers map[string]*time.Timer
 }
 
 func NewService(st *store.MemoryStore, eng *rules.Engine) *Service {
-	return &Service{
+	adminToken, err := newToken()
+	if err != nil {
+		adminToken = fmt.Sprintf("admin-%d", time.Now().UnixNano())
+	}
+	defaultRoom := newRoomState("room-1", "房间 1", "")
+	s := &Service{
 		store:         st,
 		engine:        eng,
 		aiAssignments: map[string]map[int]ai.Genome{},
-		room:          newRoomState(),
-		offlineTimers: map[string]*time.Timer{},
+		participants:  map[string]*roomParticipant{},
+		rooms:         map[string]*roomState{},
+		gameRooms:     map[string]string{},
+		nextRoom:      2,
+		adminToken:    adminToken,
+		room:          defaultRoom,
 	}
+	s.rooms[defaultRoom.ID] = &s.room
+	return s
+}
+
+func (s *Service) AdminToken() string {
+	s.roomMu.Lock()
+	defer s.roomMu.Unlock()
+	return s.adminToken
 }
 
 func (s *Service) SetNotifier(fn func()) {

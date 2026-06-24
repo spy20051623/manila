@@ -16,6 +16,7 @@ import (
 )
 
 const (
+	defaultRoomID       = "room-1"
 	operationTimeout    = 20 * time.Second
 	offlineSeatTimeout  = 20 * time.Second
 	maxAutomationSteps  = 300
@@ -39,6 +40,11 @@ type roomSeat struct {
 }
 
 type roomState struct {
+	ID                   string
+	Name                 string
+	OwnerToken           string
+	CreatedAt            time.Time
+	Closed               bool
 	Status               model.RoomStatus
 	Participants         map[string]*roomParticipant
 	Seats                map[int]*roomSeat
@@ -52,23 +58,31 @@ type roomState struct {
 	TimeoutPlayer        int
 	TimeoutEventSeq      int
 	TimeoutKind          string
+	timeoutTimer         *time.Timer
+	closeTimer           *time.Timer
+	offlineTimers        map[string]*time.Timer
 }
 
-func newRoomState() roomState {
+func newRoomState(id string, name string, ownerToken string) roomState {
 	seats := map[int]*roomSeat{}
 	for _, playerID := range model.PlayerOrder {
 		seats[playerID] = &roomSeat{Type: model.SeatTypeEmpty}
 	}
 	return roomState{
-		Status:       model.RoomStatusWaiting,
-		Participants: map[string]*roomParticipant{},
-		Seats:        seats,
-		TempAI:       map[int]bool{},
-		PendingAI:    map[int]bool{},
+		ID:            id,
+		Name:          name,
+		OwnerToken:    ownerToken,
+		CreatedAt:     time.Now(),
+		Status:        model.RoomStatusWaiting,
+		Participants:  map[string]*roomParticipant{},
+		Seats:         seats,
+		TempAI:        map[int]bool{},
+		PendingAI:     map[int]bool{},
+		offlineTimers: map[string]*time.Timer{},
 	}
 }
 
-func (s *Service) JoinRoom(name string) (string, error) {
+func (s *Service) JoinLobby(name string) (string, error) {
 	token, err := newToken()
 	if err != nil {
 		return "", err
@@ -79,18 +93,27 @@ func (s *Service) JoinRoom(name string) (string, error) {
 		s.roomMu.Unlock()
 		return "", err
 	}
-	s.room.Participants[token] = &roomParticipant{Token: token, Name: cleanName}
+	s.participants[token] = &roomParticipant{Token: token, Name: cleanName}
 	s.roomMu.Unlock()
 	s.emitRoomChange()
 	return token, nil
 }
 
+func (s *Service) JoinRoom(name string) (string, error) {
+	token, err := s.JoinLobby(name)
+	if err != nil {
+		return "", err
+	}
+	_ = s.JoinExistingRoom(defaultRoomID, token)
+	return token, nil
+}
+
 func (s *Service) RenameRoomParticipant(token string, name string) error {
 	s.roomMu.Lock()
-	participant := s.room.Participants[token]
+	participant := s.participantByTokenLocked(token)
 	if participant == nil {
 		s.roomMu.Unlock()
-		return fmt.Errorf("invalid room token")
+		return fmt.Errorf("invalid token")
 	}
 	cleanName := strings.TrimSpace(name)
 	if err := s.validatePlayerNameLocked(cleanName, token); err != nil {
@@ -103,9 +126,46 @@ func (s *Service) RenameRoomParticipant(token string, name string) error {
 	return nil
 }
 
+func (s *Service) CreateRoom(token string) (model.RoomView, error) {
+	s.roomMu.Lock()
+	participant := s.participantByTokenLocked(token)
+	if participant == nil {
+		s.roomMu.Unlock()
+		return model.RoomView{}, fmt.Errorf("invalid token")
+	}
+	id := fmt.Sprintf("room-%d", s.nextRoom)
+	name := fmt.Sprintf("房间 %d", s.nextRoom)
+	s.nextRoom++
+	room := newRoomState(id, name, token)
+	room.Participants[token] = participant
+	s.rooms[id] = &room
+	view := s.roomViewLocked(room.ID, token)
+	s.roomMu.Unlock()
+	s.emitRoomChange()
+	return view, nil
+}
+
+func (s *Service) JoinExistingRoom(roomID string, token string) error {
+	s.roomMu.Lock()
+	room := s.rooms[roomID]
+	participant := s.participants[token]
+	if room == nil || room.Closed {
+		s.roomMu.Unlock()
+		return fmt.Errorf("room not found")
+	}
+	if participant == nil {
+		s.roomMu.Unlock()
+		return fmt.Errorf("invalid token")
+	}
+	room.Participants[token] = participant
+	s.roomMu.Unlock()
+	s.emitRoomChange()
+	return nil
+}
+
 func (s *Service) ConnectRoomParticipant(token string) bool {
 	s.roomMu.Lock()
-	participant := s.room.Participants[token]
+	participant := s.participants[token]
 	if participant == nil {
 		s.roomMu.Unlock()
 		return false
@@ -113,7 +173,9 @@ func (s *Service) ConnectRoomParticipant(token string) bool {
 	wasOffline := !participant.Online
 	participant.Connections++
 	participant.Online = true
-	s.stopOfflineReleaseLocked(token)
+	for _, room := range s.rooms {
+		s.stopOfflineReleaseLocked(room, token)
+	}
 	s.roomMu.Unlock()
 	if wasOffline {
 		s.emitRoomChange()
@@ -122,9 +184,9 @@ func (s *Service) ConnectRoomParticipant(token string) bool {
 }
 
 func (s *Service) DisconnectRoomParticipant(token string) {
-	needsAutomation := false
+	automationRooms := []string{}
 	s.roomMu.Lock()
-	participant := s.room.Participants[token]
+	participant := s.participantByTokenLocked(token)
 	if participant == nil {
 		s.roomMu.Unlock()
 		return
@@ -141,29 +203,63 @@ func (s *Service) DisconnectRoomParticipant(token string) {
 		return
 	}
 	participant.Online = false
-	playerID := s.playerIDForTokenLocked(token)
-	if s.room.Status == model.RoomStatusWaiting && playerID != 0 {
-		if s.room.Seats[playerID].Ready {
-			s.room.Seats[playerID].Ready = false
+	for _, room := range s.rooms {
+		playerID := s.playerIDForTokenLocked(room, token)
+		if room.Status == model.RoomStatusWaiting && playerID != 0 {
+			if room.Seats[playerID].Ready {
+				room.Seats[playerID].Ready = false
+			}
+			s.scheduleOfflineReleaseLocked(room, token)
 		}
-		s.scheduleOfflineReleaseLocked(token)
-	}
-	if s.room.Status == model.RoomStatusInProgress {
-		needsAutomation = true
+		if room.Status == model.RoomStatusInProgress && playerID != 0 {
+			automationRooms = append(automationRooms, room.ID)
+		}
 	}
 	s.roomMu.Unlock()
 	s.emitRoomChange()
-	if needsAutomation {
-		go s.processRoomAutomation()
+	for _, roomID := range automationRooms {
+		go s.processRoomAutomation(roomID)
 	}
 }
 
-func (s *Service) RoomView(token string) (model.RoomView, error) {
+func (s *Service) LobbyView(token string) (model.LobbyView, error) {
 	s.roomMu.Lock()
-	view := s.roomViewLocked(token)
+	view := model.LobbyView{
+		Participant:   s.participantViewLocked(token, ""),
+		SuggestedName: s.defaultPlayerNameLocked(),
+	}
+	rooms := make([]*roomState, 0, len(s.rooms))
+	for _, room := range s.rooms {
+		if !room.Closed {
+			rooms = append(rooms, room)
+		}
+	}
+	sort.Slice(rooms, func(i, j int) bool {
+		return rooms[i].CreatedAt.Before(rooms[j].CreatedAt)
+	})
+	for _, room := range rooms {
+		view.Rooms = append(view.Rooms, s.roomSummaryLocked(room, token))
+	}
 	s.roomMu.Unlock()
 	view.CompletedGames = s.completedGameSummaries()
 	return view, nil
+}
+
+func (s *Service) RoomViewInRoom(roomID string, token string) (model.RoomView, error) {
+	s.roomMu.Lock()
+	room := s.rooms[roomID]
+	if room == nil || room.Closed {
+		s.roomMu.Unlock()
+		return model.RoomView{}, fmt.Errorf("room not found")
+	}
+	view := s.roomViewLocked(roomID, token)
+	s.roomMu.Unlock()
+	view.CompletedGames = s.completedGameSummaries()
+	return view, nil
+}
+
+func (s *Service) RoomView(token string) (model.RoomView, error) {
+	return s.RoomViewInRoom(defaultRoomID, token)
 }
 
 func (s *Service) completedGameSummaries() []model.CompletedGameSummary {
@@ -204,45 +300,52 @@ func gameNumber(id string) int {
 }
 
 func (s *Service) RoomPlayerID(token string) int {
+	return s.RoomPlayerIDInRoom(defaultRoomID, token)
+}
+
+func (s *Service) RoomPlayerIDInRoom(roomID string, token string) int {
 	s.roomMu.Lock()
 	defer s.roomMu.Unlock()
-	return s.playerIDForTokenLocked(token)
+	return s.playerIDForTokenLocked(s.rooms[roomID], token)
 }
 
 func (s *Service) GamePlayerID(token string, gameID string) int {
 	s.roomMu.Lock()
 	defer s.roomMu.Unlock()
-	if gameID == "" || s.room.ActiveGameID != gameID {
-		return 0
-	}
-	return s.playerIDForTokenLocked(token)
+	room := s.roomForGameLocked(gameID)
+	return s.playerIDForTokenLocked(room, token)
 }
 
 func (s *Service) IsActiveRoomGame(gameID string) bool {
 	s.roomMu.Lock()
 	defer s.roomMu.Unlock()
-	return gameID != "" && s.room.ActiveGameID == gameID && s.room.Status == model.RoomStatusInProgress
+	room := s.roomForGameLocked(gameID)
+	return room != nil && !room.Closed && room.ActiveGameID == gameID && room.Status == model.RoomStatusInProgress
 }
 
 func (s *Service) ClaimSeat(token string, playerID int) error {
-	changed, err := s.withWaitingParticipant(token, func() error {
+	return s.ClaimSeatInRoom(defaultRoomID, token, playerID)
+}
+
+func (s *Service) ClaimSeatInRoom(roomID string, token string, playerID int) error {
+	changed, err := s.withWaitingParticipant(roomID, token, func(room *roomState) error {
 		if !validPlayerID(playerID) {
 			return fmt.Errorf("invalid player id")
 		}
-		if s.room.Seats[playerID].Type != model.SeatTypeEmpty {
+		if room.Seats[playerID].Type != model.SeatTypeEmpty {
 			return fmt.Errorf("seat is occupied")
 		}
-		current := s.playerIDForTokenLocked(token)
-		if current != 0 && s.room.Seats[current].Ready {
+		current := s.playerIDForTokenLocked(room, token)
+		if current != 0 && room.Seats[current].Ready {
 			return fmt.Errorf("cancel ready before switching seats")
 		}
 		if current != 0 {
-			s.room.Seats[current] = &roomSeat{Type: model.SeatTypeEmpty}
+			room.Seats[current] = &roomSeat{Type: model.SeatTypeEmpty}
 		}
-		s.room.Seats[playerID] = &roomSeat{Type: model.SeatTypeHuman, Token: token}
-		s.stopOfflineReleaseLocked(token)
-		if participant := s.room.Participants[token]; participant != nil && !participant.Online {
-			s.scheduleOfflineReleaseLocked(token)
+		room.Seats[playerID] = &roomSeat{Type: model.SeatTypeHuman, Token: token}
+		s.stopOfflineReleaseLocked(room, token)
+		if participant := s.participantByTokenLocked(token); participant != nil && !participant.Online {
+			s.scheduleOfflineReleaseLocked(room, token)
 		}
 		return nil
 	})
@@ -256,16 +359,20 @@ func (s *Service) ClaimSeat(token string, playerID int) error {
 }
 
 func (s *Service) LeaveSeat(token string) error {
-	changed, err := s.withWaitingParticipant(token, func() error {
-		playerID := s.playerIDForTokenLocked(token)
+	return s.LeaveSeatInRoom(defaultRoomID, token)
+}
+
+func (s *Service) LeaveSeatInRoom(roomID string, token string) error {
+	changed, err := s.withWaitingParticipant(roomID, token, func(room *roomState) error {
+		playerID := s.playerIDForTokenLocked(room, token)
 		if playerID == 0 {
 			return fmt.Errorf("not seated")
 		}
-		if s.room.Seats[playerID].Ready {
+		if room.Seats[playerID].Ready {
 			return fmt.Errorf("cancel ready before leaving seat")
 		}
-		s.room.Seats[playerID] = &roomSeat{Type: model.SeatTypeEmpty}
-		s.stopOfflineReleaseLocked(token)
+		room.Seats[playerID] = &roomSeat{Type: model.SeatTypeEmpty}
+		s.stopOfflineReleaseLocked(room, token)
 		return nil
 	})
 	if err != nil {
@@ -278,31 +385,39 @@ func (s *Service) LeaveSeat(token string) error {
 }
 
 func (s *Service) Ready(token string) error {
-	changed, err := s.withWaitingParticipant(token, func() error {
-		playerID := s.playerIDForTokenLocked(token)
+	return s.ReadyInRoom(defaultRoomID, token)
+}
+
+func (s *Service) ReadyInRoom(roomID string, token string) error {
+	changed, err := s.withWaitingParticipant(roomID, token, func(room *roomState) error {
+		playerID := s.playerIDForTokenLocked(room, token)
 		if playerID == 0 {
 			return fmt.Errorf("choose a seat before ready")
 		}
-		s.room.Seats[playerID].Ready = true
+		room.Seats[playerID].Ready = true
 		return nil
 	})
 	if err != nil {
 		return err
 	}
 	if changed {
-		s.maybeStartRoomGame()
+		s.maybeStartRoomGame(roomID)
 		s.emitRoomChange()
 	}
 	return nil
 }
 
 func (s *Service) Unready(token string) error {
-	changed, err := s.withWaitingParticipant(token, func() error {
-		playerID := s.playerIDForTokenLocked(token)
+	return s.UnreadyInRoom(defaultRoomID, token)
+}
+
+func (s *Service) UnreadyInRoom(roomID string, token string) error {
+	changed, err := s.withWaitingParticipant(roomID, token, func(room *roomState) error {
+		playerID := s.playerIDForTokenLocked(room, token)
 		if playerID == 0 {
 			return fmt.Errorf("not seated")
 		}
-		s.room.Seats[playerID].Ready = false
+		room.Seats[playerID].Ready = false
 		return nil
 	})
 	if err != nil {
@@ -315,41 +430,49 @@ func (s *Service) Unready(token string) error {
 }
 
 func (s *Service) PlaceAI(token string, playerID int) error {
-	changed, err := s.withWaitingParticipant(token, func() error {
-		if !s.canManageAILocked(token) {
+	return s.PlaceAIInRoom(defaultRoomID, token, playerID)
+}
+
+func (s *Service) PlaceAIInRoom(roomID string, token string, playerID int) error {
+	changed, err := s.withWaitingParticipant(roomID, token, func(room *roomState) error {
+		if !s.canManageAILocked(room, token) {
 			return fmt.Errorf("cannot manage AI")
 		}
 		if !validPlayerID(playerID) {
 			return fmt.Errorf("invalid player id")
 		}
-		if s.room.Seats[playerID].Type != model.SeatTypeEmpty {
+		if room.Seats[playerID].Type != model.SeatTypeEmpty {
 			return fmt.Errorf("seat is occupied")
 		}
-		s.room.Seats[playerID] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
+		room.Seats[playerID] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
 		return nil
 	})
 	if err != nil {
 		return err
 	}
 	if changed {
-		s.maybeStartRoomGame()
+		s.maybeStartRoomGame(roomID)
 		s.emitRoomChange()
 	}
 	return nil
 }
 
 func (s *Service) RemoveAI(token string, playerID int) error {
-	changed, err := s.withWaitingParticipant(token, func() error {
-		if !s.canManageAILocked(token) {
+	return s.RemoveAIInRoom(defaultRoomID, token, playerID)
+}
+
+func (s *Service) RemoveAIInRoom(roomID string, token string, playerID int) error {
+	changed, err := s.withWaitingParticipant(roomID, token, func(room *roomState) error {
+		if !s.canManageAILocked(room, token) {
 			return fmt.Errorf("cannot manage AI")
 		}
 		if !validPlayerID(playerID) {
 			return fmt.Errorf("invalid player id")
 		}
-		if s.room.Seats[playerID].Type != model.SeatTypeAI {
+		if room.Seats[playerID].Type != model.SeatTypeAI {
 			return fmt.Errorf("seat does not contain AI")
 		}
-		s.room.Seats[playerID] = &roomSeat{Type: model.SeatTypeEmpty}
+		room.Seats[playerID] = &roomSeat{Type: model.SeatTypeEmpty}
 		return nil
 	})
 	if err != nil {
@@ -362,16 +485,21 @@ func (s *Service) RemoveAI(token string, playerID int) error {
 }
 
 func (s *Service) ApplyRoomAction(token string, action model.Action) (*model.Game, error) {
-	playerID := s.RoomPlayerID(token)
+	return s.ApplyRoomActionInRoom(defaultRoomID, token, action)
+}
+
+func (s *Service) ApplyRoomActionInRoom(roomID string, token string, action model.Action) (*model.Game, error) {
+	playerID := s.RoomPlayerIDInRoom(roomID, token)
 	if playerID == 0 || action.PlayerID != playerID {
 		return nil, fmt.Errorf("token cannot act for player")
 	}
 	s.roomMu.Lock()
-	if s.room.Status != model.RoomStatusInProgress || s.room.ActiveGameID == "" {
+	room := s.rooms[roomID]
+	if room == nil || room.Closed || room.Status != model.RoomStatusInProgress || room.ActiveGameID == "" {
 		s.roomMu.Unlock()
 		return nil, fmt.Errorf("room is not in progress")
 	}
-	gameID := s.room.ActiveGameID
+	gameID := room.ActiveGameID
 	s.roomMu.Unlock()
 
 	ref, ok := s.store.Get(gameID)
@@ -386,24 +514,41 @@ func (s *Service) ApplyRoomAction(token string, action model.Action) (*model.Gam
 	if err != nil {
 		return nil, err
 	}
-	s.markHumanAction()
+	s.markHumanAction(roomID)
 	if g.Status == model.StatusEnded {
 		s.finishActiveEndedRoomGame(g, false)
 		return g, nil
 	}
 	s.emitGameChange(gameID)
-	go s.processRoomAutomation()
+	go s.processRoomAutomation(roomID)
 	return g, nil
 }
 
+func (s *Service) ApplyRoomActionForGame(token string, gameID string, action model.Action) (*model.Game, error) {
+	roomID, err := s.RoomIDForGame(gameID)
+	if err != nil {
+		return nil, err
+	}
+	return s.ApplyRoomActionInRoom(roomID, token, action)
+}
+
 func (s *Service) RoomLegalActions(token string) ([]model.LegalAction, int, error) {
-	playerID := s.RoomPlayerID(token)
+	return s.RoomLegalActionsInRoom(defaultRoomID, token)
+}
+
+func (s *Service) RoomLegalActionsInRoom(roomID string, token string) ([]model.LegalAction, int, error) {
+	playerID := s.RoomPlayerIDInRoom(roomID, token)
 	if playerID == 0 {
 		return []model.LegalAction{}, 0, nil
 	}
 	s.roomMu.Lock()
-	gameID := s.room.ActiveGameID
-	status := s.room.Status
+	room := s.rooms[roomID]
+	gameID := ""
+	status := model.RoomStatusWaiting
+	if room != nil && !room.Closed {
+		gameID = room.ActiveGameID
+		status = room.Status
+	}
 	s.roomMu.Unlock()
 	if status != model.RoomStatusInProgress || gameID == "" {
 		return []model.LegalAction{}, 0, nil
@@ -412,47 +557,56 @@ func (s *Service) RoomLegalActions(token string) ([]model.LegalAction, int, erro
 }
 
 func (s *Service) RoomAIStep(token string) (*model.Game, model.Action, error) {
-	playerID := s.RoomPlayerID(token)
+	return s.RoomAIStepInRoom(defaultRoomID, token)
+}
+
+func (s *Service) RoomAIStepInRoom(roomID string, token string) (*model.Game, model.Action, error) {
+	playerID := s.RoomPlayerIDInRoom(roomID, token)
 	if playerID == 0 {
 		return nil, model.Action{}, fmt.Errorf("not seated")
 	}
-	if g, action, ok, err := s.applyConfirmRoundForHumanSeat(playerID); ok || err != nil {
+	if g, action, ok, err := s.applyConfirmRoundForHumanSeat(roomID, playerID); ok || err != nil {
 		if err != nil {
 			return nil, model.Action{}, err
 		}
-		s.markHumanAction()
+		s.markHumanAction(roomID)
 		if g.Status == model.StatusEnded {
 			s.finishActiveEndedRoomGame(g, false)
 		}
 		s.emitGameChange(g.ID)
-		go s.processRoomAutomation()
+		go s.processRoomAutomation(roomID)
 		return g, action, nil
 	}
-	g, action, err := s.applyAIForHumanSeat(playerID, false)
+	g, action, err := s.applyAIForHumanSeat(roomID, playerID, false)
 	if err != nil {
 		return nil, model.Action{}, err
 	}
-	s.markHumanAction()
+	s.markHumanAction(roomID)
 	if g.Status == model.StatusEnded {
 		s.finishActiveEndedRoomGame(g, false)
 		return g, action, nil
 	}
 	s.emitGameChange(g.ID)
-	go s.processRoomAutomation()
+	go s.processRoomAutomation(roomID)
 	return g, action, nil
 }
 
 func (s *Service) RoomAIRound(token string) (*model.Game, error) {
-	playerID := s.RoomPlayerID(token)
+	return s.RoomAIRoundInRoom(defaultRoomID, token)
+}
+
+func (s *Service) RoomAIRoundInRoom(roomID string, token string) (*model.Game, error) {
+	playerID := s.RoomPlayerIDInRoom(roomID, token)
 	if playerID == 0 {
 		return nil, fmt.Errorf("not seated")
 	}
 	s.roomMu.Lock()
-	if s.room.Status != model.RoomStatusInProgress || s.room.ActiveGameID == "" {
+	room := s.rooms[roomID]
+	if room == nil || room.Closed || room.Status != model.RoomStatusInProgress || room.ActiveGameID == "" {
 		s.roomMu.Unlock()
 		return nil, fmt.Errorf("room is not in progress")
 	}
-	gameID := s.room.ActiveGameID
+	gameID := room.ActiveGameID
 	s.roomMu.Unlock()
 
 	ref, ok := s.store.Get(gameID)
@@ -471,14 +625,16 @@ func (s *Service) RoomAIRound(token string) (*model.Game, error) {
 		advanced := g.Phase != model.PhaseRoundReview
 		ref.Mu.Unlock()
 		s.roomMu.Lock()
-		s.room.PendingAI[playerID] = true
-		if advanced {
-			s.activatePendingAILocked()
+		if room := s.rooms[roomID]; room != nil && !room.Closed {
+			room.PendingAI[playerID] = true
+			if advanced {
+				s.activatePendingAILocked(room)
+			}
 		}
 		s.roomMu.Unlock()
-		s.markHumanAction()
+		s.markHumanAction(roomID)
 		s.emitGameChange(gameID)
-		go s.processRoomAutomation()
+		go s.processRoomAutomation(roomID)
 		return g, nil
 	}
 	if roomActorForPhase(ref.Game) != playerID {
@@ -488,33 +644,36 @@ func (s *Service) RoomAIRound(token string) (*model.Game, error) {
 	ref.Mu.Unlock()
 
 	s.roomMu.Lock()
-	s.room.TempAI[playerID] = true
+	if room := s.rooms[roomID]; room != nil && !room.Closed {
+		room.TempAI[playerID] = true
+	}
 	s.roomMu.Unlock()
-	g, _, err := s.applyAIForHumanSeat(playerID, true)
+	g, _, err := s.applyAIForHumanSeat(roomID, playerID, true)
 	if err != nil {
 		return nil, err
 	}
-	s.markHumanAction()
+	s.markHumanAction(roomID)
 	if g.Status == model.StatusEnded {
 		s.finishActiveEndedRoomGame(g, false)
 		return g, nil
 	}
 	s.emitGameChange(g.ID)
-	go s.processRoomAutomation()
+	go s.processRoomAutomation(roomID)
 	return g, nil
 }
 
-func (s *Service) applyConfirmRoundForHumanSeat(playerID int) (*model.Game, model.Action, bool, error) {
+func (s *Service) applyConfirmRoundForHumanSeat(roomID string, playerID int) (*model.Game, model.Action, bool, error) {
 	s.roomMu.Lock()
-	if s.room.Status != model.RoomStatusInProgress || s.room.ActiveGameID == "" {
+	room := s.rooms[roomID]
+	if room == nil || room.Closed || room.Status != model.RoomStatusInProgress || room.ActiveGameID == "" {
 		s.roomMu.Unlock()
 		return nil, model.Action{}, false, nil
 	}
-	if s.room.Seats[playerID].Type != model.SeatTypeHuman {
+	if room.Seats[playerID].Type != model.SeatTypeHuman {
 		s.roomMu.Unlock()
 		return nil, model.Action{}, false, fmt.Errorf("not a human seat")
 	}
-	gameID := s.room.ActiveGameID
+	gameID := room.ActiveGameID
 	ref, ok := s.store.Get(gameID)
 	if !ok {
 		s.roomMu.Unlock()
@@ -543,24 +702,31 @@ func (s *Service) applyConfirmRoundForHumanSeat(playerID int) (*model.Game, mode
 	return g, action, true, nil
 }
 
-func (s *Service) withWaitingParticipant(token string, fn func() error) (bool, error) {
+func (s *Service) withWaitingParticipant(roomID string, token string, fn func(*roomState) error) (bool, error) {
 	s.roomMu.Lock()
 	defer s.roomMu.Unlock()
-	if !s.validTokenLocked(token) {
+	room := s.rooms[roomID]
+	if room == nil || room.Closed {
+		return false, fmt.Errorf("room not found")
+	}
+	participant := s.participantByTokenLocked(token)
+	if participant == nil {
 		return false, fmt.Errorf("invalid token")
 	}
-	if s.room.Status != model.RoomStatusWaiting {
+	room.Participants[token] = participant
+	if room.Status != model.RoomStatusWaiting {
 		return false, fmt.Errorf("room is not waiting")
 	}
-	if err := fn(); err != nil {
+	if err := fn(room); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-func (s *Service) maybeStartRoomGame() {
+func (s *Service) maybeStartRoomGame(roomID string) {
 	s.roomMu.Lock()
-	if s.room.Status != model.RoomStatusWaiting || !s.allSeatsReadyLocked() {
+	room := s.rooms[roomID]
+	if room == nil || room.Closed || room.Status != model.RoomStatusWaiting || !s.allSeatsReadyLocked(room) {
 		s.roomMu.Unlock()
 		return
 	}
@@ -571,21 +737,22 @@ func (s *Service) maybeStartRoomGame() {
 		return
 	}
 	s.store.Put(g)
-	s.room.Status = model.RoomStatusInProgress
-	s.room.ActiveGameID = id
-	s.room.CloseAt = time.Time{}
-	s.room.CloseReason = ""
-	s.room.TempAI = map[int]bool{}
-	s.room.PendingAI = map[int]bool{}
-	s.room.RoundNumber = g.RoundNumber
-	s.room.HumanActionThisRound = false
+	room.Status = model.RoomStatusInProgress
+	room.ActiveGameID = id
+	room.CloseAt = time.Time{}
+	room.CloseReason = ""
+	room.TempAI = map[int]bool{}
+	room.PendingAI = map[int]bool{}
+	room.RoundNumber = g.RoundNumber
+	room.HumanActionThisRound = false
+	s.gameRooms[id] = roomID
 	s.roomMu.Unlock()
-	go s.processRoomAutomation()
+	go s.processRoomAutomation(roomID)
 }
 
-func (s *Service) processRoomAutomation() {
+func (s *Service) processRoomAutomation(roomID string) {
 	for step := 0; step < maxAutomationSteps; step++ {
-		gameID, changed, roomChanged, continueLoop := s.processRoomAutomationStep()
+		gameID, changed, roomChanged, continueLoop := s.processRoomAutomationStep(roomID)
 		if changed && gameID != "" {
 			s.emitGameChange(gameID)
 		}
@@ -598,13 +765,14 @@ func (s *Service) processRoomAutomation() {
 	}
 }
 
-func (s *Service) processRoomAutomationStep() (string, bool, bool, bool) {
+func (s *Service) processRoomAutomationStep(roomID string) (string, bool, bool, bool) {
 	s.roomMu.Lock()
-	if s.room.Status != model.RoomStatusInProgress || s.room.ActiveGameID == "" {
+	room := s.rooms[roomID]
+	if room == nil || room.Closed || room.Status != model.RoomStatusInProgress || room.ActiveGameID == "" {
 		s.roomMu.Unlock()
 		return "", false, false, false
 	}
-	gameID := s.room.ActiveGameID
+	gameID := room.ActiveGameID
 	ref, ok := s.store.Get(gameID)
 	if !ok {
 		s.roomMu.Unlock()
@@ -613,45 +781,45 @@ func (s *Service) processRoomAutomationStep() (string, bool, bool, bool) {
 	ref.Mu.Lock()
 	g := ref.Game
 	if g.Status == model.StatusEnded {
-		s.finishEndedRoomGameLocked(g)
+		s.finishEndedRoomGameLocked(room, g)
 		ref.Mu.Unlock()
 		s.roomMu.Unlock()
-		return gameID, true, false, false
+		return gameID, true, true, false
 	}
 	if g.Phase == model.PhaseRoundReview {
 		changed := false
-		s.clearTempAIOnReviewLocked(g)
+		s.clearTempAIOnReviewLocked(room, g)
 		if g.Round.ConfirmedPlayers == nil {
 			g.Round.ConfirmedPlayers = map[int]bool{}
 		}
 		for _, playerID := range model.PlayerOrder {
-			if s.room.Seats[playerID].Type == model.SeatTypeAI && !g.Round.ConfirmedPlayers[playerID] {
+			if room.Seats[playerID].Type == model.SeatTypeAI && !g.Round.ConfirmedPlayers[playerID] {
 				_ = s.engine.ApplyAction(g, model.Action{PlayerID: playerID, Type: model.ActionConfirmRound})
 				changed = true
 			}
 		}
 		if g.Phase != model.PhaseRoundReview {
-			s.afterRoundAdvancedLocked(g)
-			if s.room.Status == model.RoomStatusInProgress {
-				s.activatePendingAILocked()
+			s.afterRoundAdvancedLocked(room, g)
+			if room.Status == model.RoomStatusInProgress {
+				s.activatePendingAILocked(room)
 			}
 			ref.Mu.Unlock()
 			s.roomMu.Unlock()
 			return gameID, true, false, true
 		}
-		s.scheduleReviewTimeoutLocked(g)
+		s.scheduleReviewTimeoutLocked(room, g)
 		ref.Mu.Unlock()
 		s.roomMu.Unlock()
 		return gameID, changed, false, false
 	}
-	if g.RoundNumber > s.room.RoundNumber {
-		s.afterRoundAdvancedLocked(g)
-		if s.room.Status != model.RoomStatusInProgress {
+	if g.RoundNumber > room.RoundNumber {
+		s.afterRoundAdvancedLocked(room, g)
+		if room.Status != model.RoomStatusInProgress {
 			ref.Mu.Unlock()
 			s.roomMu.Unlock()
 			return gameID, true, true, false
 		}
-		s.activatePendingAILocked()
+		s.activatePendingAILocked(room)
 	}
 	current := roomActorForPhase(g)
 	if !validPlayerID(current) {
@@ -659,8 +827,8 @@ func (s *Service) processRoomAutomationStep() (string, bool, bool, bool) {
 		s.roomMu.Unlock()
 		return gameID, false, false, false
 	}
-	seat := s.room.Seats[current]
-	if seat.Type == model.SeatTypeAI || s.room.TempAI[current] {
+	seat := room.Seats[current]
+	if seat.Type == model.SeatTypeAI || room.TempAI[current] {
 		action, err := s.trainedActionLocked(g, current)
 		if err != nil {
 			ref.Mu.Unlock()
@@ -669,34 +837,35 @@ func (s *Service) processRoomAutomationStep() (string, bool, bool, bool) {
 		}
 		_ = s.engine.ApplyAction(g, action)
 		if g.Status == model.StatusEnded {
-			s.finishEndedRoomGameLocked(g)
+			s.finishEndedRoomGameLocked(room, g)
 			ref.Mu.Unlock()
 			s.roomMu.Unlock()
-			return gameID, true, false, false
+			return gameID, true, true, false
 		}
-		s.clearTempAIOnReviewLocked(g)
-		s.afterPossibleRoundChangeLocked(g)
+		s.clearTempAIOnReviewLocked(room, g)
+		s.afterPossibleRoundChangeLocked(room, g)
 		ref.Mu.Unlock()
 		s.roomMu.Unlock()
 		return gameID, true, false, true
 	}
-	s.scheduleHumanTimeoutLocked(g, current)
+	s.scheduleHumanTimeoutLocked(room, g, current)
 	ref.Mu.Unlock()
 	s.roomMu.Unlock()
 	return gameID, false, false, false
 }
 
-func (s *Service) applyAIForHumanSeat(playerID int, allowRoundTakeover bool) (*model.Game, model.Action, error) {
+func (s *Service) applyAIForHumanSeat(roomID string, playerID int, allowRoundTakeover bool) (*model.Game, model.Action, error) {
 	s.roomMu.Lock()
-	if s.room.Status != model.RoomStatusInProgress || s.room.ActiveGameID == "" {
+	room := s.rooms[roomID]
+	if room == nil || room.Closed || room.Status != model.RoomStatusInProgress || room.ActiveGameID == "" {
 		s.roomMu.Unlock()
 		return nil, model.Action{}, fmt.Errorf("room is not in progress")
 	}
-	if s.room.Seats[playerID].Type != model.SeatTypeHuman {
+	if room.Seats[playerID].Type != model.SeatTypeHuman {
 		s.roomMu.Unlock()
 		return nil, model.Action{}, fmt.Errorf("not a human seat")
 	}
-	gameID := s.room.ActiveGameID
+	gameID := room.ActiveGameID
 	ref, ok := s.store.Get(gameID)
 	if !ok {
 		s.roomMu.Unlock()
@@ -720,11 +889,11 @@ func (s *Service) applyAIForHumanSeat(playerID int, allowRoundTakeover bool) (*m
 		return nil, model.Action{}, err
 	}
 	if ref.Game.Phase == model.PhaseRoundReview {
-		s.clearTempAIOnReviewLocked(ref.Game)
+		s.clearTempAIOnReviewLocked(room, ref.Game)
 	} else if !allowRoundTakeover {
-		delete(s.room.TempAI, playerID)
+		delete(room.TempAI, playerID)
 	}
-	s.afterPossibleRoundChangeLocked(ref.Game)
+	s.afterPossibleRoundChangeLocked(room, ref.Game)
 	g := ref.Game
 	ref.Mu.Unlock()
 	s.roomMu.Unlock()
@@ -740,43 +909,45 @@ func (s *Service) trainedActionLocked(g *model.Game, playerID int) (model.Action
 	return agent.ChooseAction(s.engine, g, playerID)
 }
 
-func (s *Service) clearTempAIOnReviewLocked(g *model.Game) {
-	if g.Phase == model.PhaseRoundReview && len(s.room.TempAI) > 0 {
-		s.room.TempAI = map[int]bool{}
+func (s *Service) clearTempAIOnReviewLocked(room *roomState, g *model.Game) {
+	if g.Phase == model.PhaseRoundReview && len(room.TempAI) > 0 {
+		room.TempAI = map[int]bool{}
 	}
 }
 
-func (s *Service) activatePendingAILocked() {
-	if len(s.room.PendingAI) == 0 {
+func (s *Service) activatePendingAILocked(room *roomState) {
+	if len(room.PendingAI) == 0 {
 		return
 	}
-	if s.room.TempAI == nil {
-		s.room.TempAI = map[int]bool{}
+	if room.TempAI == nil {
+		room.TempAI = map[int]bool{}
 	}
-	for playerID := range s.room.PendingAI {
-		s.room.TempAI[playerID] = true
+	for playerID := range room.PendingAI {
+		room.TempAI[playerID] = true
 	}
-	s.room.PendingAI = map[int]bool{}
+	room.PendingAI = map[int]bool{}
 }
 
-func (s *Service) scheduleHumanTimeoutLocked(g *model.Game, playerID int) {
-	if s.humanPlayerCountLocked() <= 1 {
-		s.stopTimeoutLocked()
+func (s *Service) scheduleHumanTimeoutLocked(room *roomState, g *model.Game, playerID int) {
+	if s.humanPlayerCountLocked(room) <= 1 {
+		s.stopTimeoutLocked(room)
 		return
 	}
-	s.scheduleTimeoutLocked(roomTimeoutAction, playerID, g.EventSeq, func() {
-		s.applyTimeoutAI(playerID, g.EventSeq)
+	eventSeq := g.EventSeq
+	roomID := room.ID
+	s.scheduleTimeoutLocked(room, roomTimeoutAction, playerID, eventSeq, func() {
+		s.applyTimeoutAI(roomID, playerID, eventSeq)
 	})
 }
 
-func (s *Service) scheduleReviewTimeoutLocked(g *model.Game) {
-	if s.humanPlayerCountLocked() <= 1 {
-		s.stopTimeoutLocked()
+func (s *Service) scheduleReviewTimeoutLocked(room *roomState, g *model.Game) {
+	if s.humanPlayerCountLocked(room) <= 1 {
+		s.stopTimeoutLocked(room)
 		return
 	}
 	hasUnconfirmed := false
 	for _, playerID := range model.PlayerOrder {
-		seat := s.room.Seats[playerID]
+		seat := room.Seats[playerID]
 		if seat.Type != model.SeatTypeHuman || g.Round.ConfirmedPlayers[playerID] {
 			continue
 		}
@@ -784,53 +955,59 @@ func (s *Service) scheduleReviewTimeoutLocked(g *model.Game) {
 		break
 	}
 	if !hasUnconfirmed {
-		if s.room.TimeoutKind == roomTimeoutReview {
-			s.stopTimeoutLocked()
+		if room.TimeoutKind == roomTimeoutReview {
+			s.stopTimeoutLocked(room)
 		}
 		return
 	}
-	s.scheduleTimeoutLocked(roomTimeoutReview, 0, g.EventSeq, func() {
-		s.applyReviewTimeout(g.EventSeq)
+	roomID := room.ID
+	eventSeq := g.EventSeq
+	s.scheduleTimeoutLocked(room, roomTimeoutReview, 0, eventSeq, func() {
+		s.applyReviewTimeout(roomID, eventSeq)
 	})
 }
 
-func (s *Service) scheduleTimeoutLocked(kind string, playerID int, eventSeq int, fn func()) {
-	if s.room.TimeoutKind == kind && s.room.TimeoutPlayer == playerID && s.room.TimeoutEventSeq == eventSeq {
+func (s *Service) scheduleTimeoutLocked(room *roomState, kind string, playerID int, eventSeq int, fn func()) {
+	if room.TimeoutKind == kind && room.TimeoutPlayer == playerID && room.TimeoutEventSeq == eventSeq {
 		return
 	}
-	if s.timeoutTimer != nil {
-		s.timeoutTimer.Stop()
+	if room.timeoutTimer != nil {
+		room.timeoutTimer.Stop()
 	}
-	s.room.TimeoutKind = kind
-	s.room.TimeoutPlayer = playerID
-	s.room.TimeoutEventSeq = eventSeq
-	s.timeoutTimer = time.AfterFunc(operationTimeout, fn)
+	room.TimeoutKind = kind
+	room.TimeoutPlayer = playerID
+	room.TimeoutEventSeq = eventSeq
+	room.timeoutTimer = time.AfterFunc(operationTimeout, fn)
 }
 
-func (s *Service) stopTimeoutLocked() {
-	if s.timeoutTimer != nil {
-		s.timeoutTimer.Stop()
-		s.timeoutTimer = nil
+func (s *Service) stopTimeoutLocked(room *roomState) {
+	if room == nil {
+		return
 	}
-	s.room.TimeoutKind = ""
-	s.room.TimeoutPlayer = 0
-	s.room.TimeoutEventSeq = 0
+	if room.timeoutTimer != nil {
+		room.timeoutTimer.Stop()
+		room.timeoutTimer = nil
+	}
+	room.TimeoutKind = ""
+	room.TimeoutPlayer = 0
+	room.TimeoutEventSeq = 0
 }
 
-func (s *Service) applyTimeoutAI(playerID int, eventSeq int) {
+func (s *Service) applyTimeoutAI(roomID string, playerID int, eventSeq int) {
 	s.roomMu.Lock()
-	if s.room.Status != model.RoomStatusInProgress || s.room.ActiveGameID == "" {
+	room := s.rooms[roomID]
+	if room == nil || room.Closed || room.Status != model.RoomStatusInProgress || room.ActiveGameID == "" {
 		s.roomMu.Unlock()
 		return
 	}
-	gameID := s.room.ActiveGameID
+	gameID := room.ActiveGameID
 	ref, ok := s.store.Get(gameID)
 	if !ok {
 		s.roomMu.Unlock()
 		return
 	}
 	ref.Mu.Lock()
-	if roomActorForPhase(ref.Game) != playerID || ref.Game.EventSeq != eventSeq || s.room.Seats[playerID].Type != model.SeatTypeHuman {
+	if roomActorForPhase(ref.Game) != playerID || ref.Game.EventSeq != eventSeq || room.Seats[playerID].Type != model.SeatTypeHuman {
 		ref.Mu.Unlock()
 		s.roomMu.Unlock()
 		return
@@ -839,27 +1016,28 @@ func (s *Service) applyTimeoutAI(playerID int, eventSeq int) {
 	if err == nil {
 		_ = s.engine.ApplyAction(ref.Game, action)
 		if ref.Game.Status == model.StatusEnded {
-			s.finishEndedRoomGameLocked(ref.Game)
+			s.finishEndedRoomGameLocked(room, ref.Game)
 		} else {
-			s.afterPossibleRoundChangeLocked(ref.Game)
+			s.afterPossibleRoundChangeLocked(room, ref.Game)
 		}
 	}
-	s.stopTimeoutLocked()
+	s.stopTimeoutLocked(room)
 	ref.Mu.Unlock()
 	s.roomMu.Unlock()
 	s.emitGameChange(gameID)
-	go s.processRoomAutomation()
+	go s.processRoomAutomation(roomID)
 }
 
-func (s *Service) applyReviewTimeout(eventSeq int) {
+func (s *Service) applyReviewTimeout(roomID string, eventSeq int) {
 	changed := false
 	continueAutomation := false
 	s.roomMu.Lock()
-	if s.room.Status != model.RoomStatusInProgress || s.room.ActiveGameID == "" {
+	room := s.rooms[roomID]
+	if room == nil || room.Closed || room.Status != model.RoomStatusInProgress || room.ActiveGameID == "" {
 		s.roomMu.Unlock()
 		return
 	}
-	gameID := s.room.ActiveGameID
+	gameID := room.ActiveGameID
 	ref, ok := s.store.Get(gameID)
 	if !ok {
 		s.roomMu.Unlock()
@@ -876,7 +1054,7 @@ func (s *Service) applyReviewTimeout(eventSeq int) {
 		g.Round.ConfirmedPlayers = map[int]bool{}
 	}
 	for _, playerID := range model.PlayerOrder {
-		seat := s.room.Seats[playerID]
+		seat := room.Seats[playerID]
 		if seat.Type != model.SeatTypeHuman || g.Round.ConfirmedPlayers[playerID] {
 			continue
 		}
@@ -885,80 +1063,85 @@ func (s *Service) applyReviewTimeout(eventSeq int) {
 		}
 	}
 	if g.Phase != model.PhaseRoundReview {
-		s.afterRoundAdvancedLocked(g)
-		if s.room.Status == model.RoomStatusInProgress {
-			s.activatePendingAILocked()
+		s.afterRoundAdvancedLocked(room, g)
+		if room.Status == model.RoomStatusInProgress {
+			s.activatePendingAILocked(room)
 			continueAutomation = true
 		}
 	}
-	s.stopTimeoutLocked()
+	s.stopTimeoutLocked(room)
 	ref.Mu.Unlock()
 	s.roomMu.Unlock()
 	if changed {
 		s.emitGameChange(gameID)
 	}
 	if continueAutomation {
-		go s.processRoomAutomation()
+		go s.processRoomAutomation(roomID)
 	}
 }
 
-func (s *Service) markHumanAction() {
+func (s *Service) markHumanAction(roomID string) {
 	s.roomMu.Lock()
-	s.room.HumanActionThisRound = true
-	s.stopTimeoutLocked()
+	if room := s.rooms[roomID]; room != nil && !room.Closed {
+		room.HumanActionThisRound = true
+		s.stopTimeoutLocked(room)
+	}
 	s.roomMu.Unlock()
 }
 
-func (s *Service) afterPossibleRoundChangeLocked(g *model.Game) {
-	if g.RoundNumber > s.room.RoundNumber {
-		s.afterRoundAdvancedLocked(g)
-		if s.room.Status == model.RoomStatusInProgress {
-			s.activatePendingAILocked()
+func (s *Service) afterPossibleRoundChangeLocked(room *roomState, g *model.Game) {
+	if g.RoundNumber > room.RoundNumber {
+		s.afterRoundAdvancedLocked(room, g)
+		if room.Status == model.RoomStatusInProgress {
+			s.activatePendingAILocked(room)
 		}
 	}
 }
 
-func (s *Service) afterRoundAdvancedLocked(g *model.Game) {
-	if s.humanPlayerCountLocked() > 1 && !s.room.HumanActionThisRound {
-		s.setClosingLocked(roomCloseNoneActive, 0)
+func (s *Service) afterRoundAdvancedLocked(room *roomState, g *model.Game) {
+	if s.humanPlayerCountLocked(room) > 1 && !room.HumanActionThisRound {
+		s.setClosingLocked(room, roomCloseNoneActive, 0)
 		return
 	}
-	s.room.RoundNumber = g.RoundNumber
-	s.room.HumanActionThisRound = false
+	room.RoundNumber = g.RoundNumber
+	room.HumanActionThisRound = false
 }
 
-func (s *Service) setClosingLocked(reason string, delay time.Duration) {
-	s.room.Status = model.RoomStatusClosing
-	s.room.CloseReason = reason
-	s.room.CloseAt = time.Now().Add(delay)
-	s.room.TempAI = map[int]bool{}
-	s.room.PendingAI = map[int]bool{}
-	s.stopTimeoutLocked()
-	if s.closeTimer != nil {
-		s.closeTimer.Stop()
+func (s *Service) setClosingLocked(room *roomState, reason string, delay time.Duration) {
+	room.Status = model.RoomStatusClosing
+	room.CloseReason = reason
+	room.CloseAt = time.Now().Add(delay)
+	room.TempAI = map[int]bool{}
+	room.PendingAI = map[int]bool{}
+	s.stopTimeoutLocked(room)
+	if room.closeTimer != nil {
+		room.closeTimer.Stop()
 	}
-	s.closeTimer = time.AfterFunc(delay, func() {
-		s.resetClosedRoom()
+	roomID := room.ID
+	room.closeTimer = time.AfterFunc(delay, func() {
+		s.resetClosedRoom(roomID)
 	})
 }
 
-func (s *Service) resetClosedRoom() {
+func (s *Service) resetClosedRoom(roomID string) {
 	s.roomMu.Lock()
-	s.resetClosedRoomLocked()
+	if room := s.rooms[roomID]; room != nil {
+		s.resetClosedRoomLocked(room)
+	}
 	s.roomMu.Unlock()
 	s.emitRoomChange()
 }
 
-func (s *Service) resetClosedRoomLocked() {
-	s.stopTimeoutLocked()
-	if s.closeTimer != nil {
-		s.closeTimer.Stop()
-		s.closeTimer = nil
+func (s *Service) resetClosedRoomLocked(room *roomState) {
+	s.stopTimeoutLocked(room)
+	if room.closeTimer != nil {
+		room.closeTimer.Stop()
+		room.closeTimer = nil
 	}
-	s.stopAllOfflineReleasesLocked()
-	participants := s.room.Participants
-	s.room = newRoomState()
-	s.room.Participants = participants
+	s.stopAllOfflineReleasesLocked(room)
+	participants := room.Participants
+	*room = newRoomState(room.ID, room.Name, room.OwnerToken)
+	room.Participants = participants
 }
 
 func (s *Service) finishActiveEndedRoomGame(g *model.Game, emitRoom bool) bool {
@@ -966,11 +1149,12 @@ func (s *Service) finishActiveEndedRoomGame(g *model.Game, emitRoom bool) bool {
 		return false
 	}
 	s.roomMu.Lock()
-	if s.room.Status != model.RoomStatusInProgress || s.room.ActiveGameID != g.ID {
+	room := s.roomForGameLocked(g.ID)
+	if room == nil || room.Status != model.RoomStatusInProgress || room.ActiveGameID != g.ID {
 		s.roomMu.Unlock()
 		return false
 	}
-	s.finishEndedRoomGameLocked(g)
+	s.finishEndedRoomGameLocked(room, g)
 	s.roomMu.Unlock()
 	s.emitGameChange(g.ID)
 	if emitRoom {
@@ -983,64 +1167,103 @@ func (s *Service) FinishActiveRoomGame(g *model.Game) bool {
 	return s.finishActiveEndedRoomGame(g, false)
 }
 
-func (s *Service) finishEndedRoomGameLocked(g *model.Game) {
-	s.stopTimeoutLocked()
-	if s.closeTimer != nil {
-		s.closeTimer.Stop()
-		s.closeTimer = nil
+func (s *Service) finishEndedRoomGameLocked(room *roomState, g *model.Game) {
+	s.stopTimeoutLocked(room)
+	if room.closeTimer != nil {
+		room.closeTimer.Stop()
+		room.closeTimer = nil
 	}
-	s.room.Status = model.RoomStatusWaiting
-	s.room.ActiveGameID = ""
-	s.room.CloseAt = time.Time{}
-	s.room.CloseReason = ""
-	s.room.TempAI = map[int]bool{}
-	s.room.PendingAI = map[int]bool{}
-	s.room.RoundNumber = 0
-	s.room.HumanActionThisRound = false
-	s.stopAllOfflineReleasesLocked()
+	delete(s.gameRooms, room.ActiveGameID)
+	room.Status = model.RoomStatusWaiting
+	room.ActiveGameID = ""
+	room.CloseAt = time.Time{}
+	room.CloseReason = ""
+	room.TempAI = map[int]bool{}
+	room.PendingAI = map[int]bool{}
+	room.RoundNumber = 0
+	room.HumanActionThisRound = false
+	s.stopAllOfflineReleasesLocked(room)
 	for _, playerID := range model.PlayerOrder {
-		s.room.Seats[playerID] = &roomSeat{Type: model.SeatTypeEmpty}
+		room.Seats[playerID] = &roomSeat{Type: model.SeatTypeEmpty}
 	}
 }
 
-func (s *Service) scheduleOfflineReleaseLocked(token string) {
-	if token == "" {
+func (s *Service) AdminCloseRoom(roomID string, token string) error {
+	s.roomMu.Lock()
+	if token != s.adminToken {
+		s.roomMu.Unlock()
+		return fmt.Errorf("admin token required")
+	}
+	room := s.rooms[roomID]
+	if room == nil || room.Closed {
+		s.roomMu.Unlock()
+		return fmt.Errorf("room not found")
+	}
+	s.stopTimeoutLocked(room)
+	if room.closeTimer != nil {
+		room.closeTimer.Stop()
+	}
+	s.stopAllOfflineReleasesLocked(room)
+	if room.ActiveGameID != "" {
+		delete(s.gameRooms, room.ActiveGameID)
+	}
+	room.Closed = true
+	delete(s.rooms, roomID)
+	s.roomMu.Unlock()
+	s.emitRoomChange()
+	return nil
+}
+
+func (s *Service) scheduleOfflineReleaseLocked(room *roomState, token string) {
+	if room == nil || token == "" {
 		return
 	}
-	if s.offlineTimers == nil {
-		s.offlineTimers = map[string]*time.Timer{}
+	if room.offlineTimers == nil {
+		room.offlineTimers = map[string]*time.Timer{}
 	}
-	s.stopOfflineReleaseLocked(token)
-	s.offlineTimers[token] = time.AfterFunc(offlineSeatTimeout, func() {
-		s.releaseOfflineSeat(token)
+	s.stopOfflineReleaseLocked(room, token)
+	roomID := room.ID
+	room.offlineTimers[token] = time.AfterFunc(offlineSeatTimeout, func() {
+		s.releaseOfflineSeat(roomID, token)
 	})
 }
 
-func (s *Service) stopOfflineReleaseLocked(token string) {
-	if timer := s.offlineTimers[token]; timer != nil {
+func (s *Service) stopOfflineReleaseLocked(room *roomState, token string) {
+	if room == nil || room.offlineTimers == nil {
+		return
+	}
+	if timer := room.offlineTimers[token]; timer != nil {
 		timer.Stop()
-		delete(s.offlineTimers, token)
+		delete(room.offlineTimers, token)
 	}
 }
 
-func (s *Service) stopAllOfflineReleasesLocked() {
-	for token, timer := range s.offlineTimers {
+func (s *Service) stopAllOfflineReleasesLocked(room *roomState) {
+	if room == nil {
+		return
+	}
+	for token, timer := range room.offlineTimers {
 		if timer != nil {
 			timer.Stop()
 		}
-		delete(s.offlineTimers, token)
+		delete(room.offlineTimers, token)
 	}
 }
 
-func (s *Service) releaseOfflineSeat(token string) {
+func (s *Service) releaseOfflineSeat(roomID string, token string) {
 	changed := false
 	s.roomMu.Lock()
-	delete(s.offlineTimers, token)
-	participant := s.room.Participants[token]
-	if participant != nil && !participant.Online && s.room.Status == model.RoomStatusWaiting {
-		playerID := s.playerIDForTokenLocked(token)
+	room := s.rooms[roomID]
+	if room == nil {
+		s.roomMu.Unlock()
+		return
+	}
+	delete(room.offlineTimers, token)
+	participant := s.participantByTokenLocked(token)
+	if participant != nil && !participant.Online && room.Status == model.RoomStatusWaiting {
+		playerID := s.playerIDForTokenLocked(room, token)
 		if playerID != 0 {
-			s.room.Seats[playerID] = &roomSeat{Type: model.SeatTypeEmpty}
+			room.Seats[playerID] = &roomSeat{Type: model.SeatTypeEmpty}
 			changed = true
 		}
 	}
@@ -1050,26 +1273,29 @@ func (s *Service) releaseOfflineSeat(token string) {
 	}
 }
 
-func (s *Service) roomViewLocked(token string) model.RoomView {
-	playerID := s.playerIDForTokenLocked(token)
-	participantName := ""
-	if participant := s.room.Participants[token]; participant != nil {
-		participantName = participant.Name
+func (s *Service) roomViewLocked(roomID string, token string) model.RoomView {
+	room := s.rooms[roomID]
+	if room == nil {
+		return model.RoomView{Status: model.RoomStatusWaiting}
 	}
+	playerID := s.playerIDForTokenLocked(room, token)
 	view := model.RoomView{
-		Status:           s.room.Status,
-		Participant:      model.RoomParticipant{Joined: s.validTokenLocked(token), PlayerID: playerID, Name: participantName},
-		GameID:           s.room.ActiveGameID,
-		CloseReason:      s.room.CloseReason,
+		RoomID:           room.ID,
+		Name:             room.Name,
+		Status:           room.Status,
+		Participant:      s.participantViewLocked(token, room.ID),
+		GameID:           room.ActiveGameID,
+		CloseReason:      room.CloseReason,
 		SuggestedName:    s.defaultPlayerNameLocked(),
-		HumanPlayerCount: s.humanPlayerCountLocked(),
+		HumanPlayerCount: s.humanPlayerCountLocked(room),
 	}
+	view.Participant.PlayerID = playerID
 	for _, id := range model.PlayerOrder {
-		seat := s.room.Seats[id]
+		seat := room.Seats[id]
 		seatName := ""
 		seatOnline := true
 		if seat.Type == model.SeatTypeHuman {
-			if participant := s.room.Participants[seat.Token]; participant != nil {
+			if participant := s.participantForSeatLocked(room, seat.Token); participant != nil {
 				seatName = participant.Name
 				seatOnline = participant.Online
 			}
@@ -1083,31 +1309,76 @@ func (s *Service) roomViewLocked(token string) model.RoomView {
 			IsYou:    playerID == id,
 		})
 	}
-	if s.room.Status == model.RoomStatusClosing && !s.room.CloseAt.IsZero() {
-		remaining := int(time.Until(s.room.CloseAt).Seconds())
+	if room.Status == model.RoomStatusClosing && !room.CloseAt.IsZero() {
+		remaining := int(time.Until(room.CloseAt).Seconds())
 		if remaining < 0 {
 			remaining = 0
 		}
 		view.ClosingSeconds = remaining
 	}
-	if playerID != 0 && s.room.Status == model.RoomStatusWaiting {
-		seat := s.room.Seats[playerID]
+	if playerID != 0 && room.Status == model.RoomStatusWaiting {
+		seat := room.Seats[playerID]
 		view.CanReady = seat.Type == model.SeatTypeHuman && !seat.Ready
 		view.CanCancelReady = seat.Type == model.SeatTypeHuman && seat.Ready
 		view.CanLeaveSeat = seat.Type == model.SeatTypeHuman && !seat.Ready
 	}
-	if s.room.Status == model.RoomStatusWaiting {
-		view.CanManageAI = s.canManageAILocked(token)
+	if room.Status == model.RoomStatusWaiting {
+		view.CanManageAI = s.canManageAILocked(room, token)
 	}
-	view.CanAIForCurrent = s.canAIForCurrentLocked(playerID)
+	view.CanAIForCurrent = s.canAIForCurrentLocked(room, playerID)
 	return view
 }
 
-func (s *Service) canAIForCurrentLocked(playerID int) bool {
-	if playerID == 0 || s.room.Status != model.RoomStatusInProgress || s.room.ActiveGameID == "" {
+func (s *Service) participantViewLocked(token string, roomID string) model.RoomParticipant {
+	if token == s.adminToken && token != "" {
+		return model.RoomParticipant{Joined: true, Name: "管理员", IsAdmin: true}
+	}
+	participant := s.participantByTokenLocked(token)
+	if participant == nil {
+		return model.RoomParticipant{}
+	}
+	playerID := 0
+	if roomID != "" {
+		playerID = s.playerIDForTokenLocked(s.rooms[roomID], token)
+	}
+	return model.RoomParticipant{Joined: true, PlayerID: playerID, Name: participant.Name}
+}
+
+func (s *Service) roomSummaryLocked(room *roomState, token string) model.RoomSummary {
+	humans := 0
+	ais := 0
+	seats := 0
+	for _, seat := range room.Seats {
+		if seat.Type != model.SeatTypeEmpty {
+			seats++
+		}
+		if seat.Type == model.SeatTypeHuman {
+			humans++
+		}
+		if seat.Type == model.SeatTypeAI {
+			ais++
+		}
+	}
+	_, member := room.Participants[token]
+	return model.RoomSummary{
+		RoomID:           room.ID,
+		Name:             room.Name,
+		Status:           room.Status,
+		GameID:           room.ActiveGameID,
+		HumanPlayerCount: humans,
+		AIPlayerCount:    ais,
+		SeatCount:        seats,
+		IsMember:         member,
+		IsOwner:          room.OwnerToken == token && token != "",
+		CanAdminClose:    token == s.adminToken && token != "",
+	}
+}
+
+func (s *Service) canAIForCurrentLocked(room *roomState, playerID int) bool {
+	if room == nil || playerID == 0 || room.Status != model.RoomStatusInProgress || room.ActiveGameID == "" {
 		return false
 	}
-	ref, ok := s.store.Get(s.room.ActiveGameID)
+	ref, ok := s.store.Get(room.ActiveGameID)
 	if !ok {
 		return false
 	}
@@ -1128,10 +1399,10 @@ func roomActorForPhase(g *model.Game) int {
 	}
 }
 
-func (s *Service) allSeatsReadyLocked() bool {
+func (s *Service) allSeatsReadyLocked(room *roomState) bool {
 	hasHuman := false
 	for _, id := range model.PlayerOrder {
-		seat := s.room.Seats[id]
+		seat := room.Seats[id]
 		if seat.Type == model.SeatTypeEmpty {
 			return false
 		}
@@ -1145,12 +1416,12 @@ func (s *Service) allSeatsReadyLocked() bool {
 	return hasHuman
 }
 
-func (s *Service) playerIDForTokenLocked(token string) int {
-	if !s.validTokenLocked(token) {
+func (s *Service) playerIDForTokenLocked(room *roomState, token string) int {
+	if room == nil || !s.validTokenLocked(token) {
 		return 0
 	}
 	for _, id := range model.PlayerOrder {
-		seat := s.room.Seats[id]
+		seat := room.Seats[id]
 		if seat.Type == model.SeatTypeHuman && seat.Token == token {
 			return id
 		}
@@ -1162,30 +1433,86 @@ func (s *Service) validTokenLocked(token string) bool {
 	if token == "" {
 		return false
 	}
-	_, ok := s.room.Participants[token]
-	return ok
+	if token == s.adminToken {
+		return true
+	}
+	if _, ok := s.participants[token]; ok {
+		return true
+	}
+	if _, ok := s.room.Participants[token]; ok {
+		return true
+	}
+	return false
 }
 
-func (s *Service) canManageAILocked(token string) bool {
-	if !s.validTokenLocked(token) || s.room.Status != model.RoomStatusWaiting {
+func (s *Service) canManageAILocked(room *roomState, token string) bool {
+	if room == nil || token == s.adminToken || s.participantByTokenLocked(token) == nil || room.Status != model.RoomStatusWaiting {
 		return false
 	}
-	playerID := s.playerIDForTokenLocked(token)
+	room.Participants[token] = s.participantByTokenLocked(token)
+	playerID := s.playerIDForTokenLocked(room, token)
 	if playerID == 0 {
 		return true
 	}
-	seat := s.room.Seats[playerID]
+	seat := room.Seats[playerID]
 	return seat.Type == model.SeatTypeHuman && !seat.Ready
 }
 
-func (s *Service) humanPlayerCountLocked() int {
+func (s *Service) humanPlayerCountLocked(room *roomState) int {
 	count := 0
+	if room == nil {
+		return count
+	}
 	for _, id := range model.PlayerOrder {
-		if s.room.Seats[id].Type == model.SeatTypeHuman {
+		if room.Seats[id].Type == model.SeatTypeHuman {
 			count++
 		}
 	}
 	return count
+}
+
+func (s *Service) participantForSeatLocked(room *roomState, token string) *roomParticipant {
+	if participant := s.participants[token]; participant != nil {
+		return participant
+	}
+	return room.Participants[token]
+}
+
+func (s *Service) participantByTokenLocked(token string) *roomParticipant {
+	if participant := s.participants[token]; participant != nil {
+		return participant
+	}
+	if participant := s.room.Participants[token]; participant != nil {
+		return participant
+	}
+	for _, room := range s.rooms {
+		if participant := room.Participants[token]; participant != nil {
+			return participant
+		}
+	}
+	return nil
+}
+
+func (s *Service) roomForGameLocked(gameID string) *roomState {
+	if roomID := s.gameRooms[gameID]; roomID != "" {
+		return s.rooms[roomID]
+	}
+	for _, room := range s.rooms {
+		if room.ActiveGameID == gameID {
+			return room
+		}
+	}
+	return nil
+}
+
+func (s *Service) RoomIDForGame(gameID string) (string, error) {
+	s.roomMu.Lock()
+	defer s.roomMu.Unlock()
+	room := s.roomForGameLocked(gameID)
+	if room == nil || room.Closed {
+		return "", fmt.Errorf("room not found for game")
+	}
+	return room.ID, nil
 }
 
 func (s *Service) emitRoomChange() {
@@ -1228,7 +1555,7 @@ func (s *Service) validatePlayerNameLocked(name string, exceptToken string) erro
 	if utf8.RuneCountInString(name) > maxPlayerNameRunes {
 		return fmt.Errorf("player name must be at most %d characters", maxPlayerNameRunes)
 	}
-	for token, participant := range s.room.Participants {
+	for token, participant := range s.participants {
 		if token == exceptToken {
 			continue
 		}
@@ -1243,7 +1570,7 @@ func (s *Service) defaultPlayerNameLocked() string {
 	for i := 1; ; i++ {
 		name := fmt.Sprintf("Player %d", i)
 		used := false
-		for _, participant := range s.room.Participants {
+		for _, participant := range s.participants {
 			if strings.EqualFold(participant.Name, name) {
 				used = true
 				break

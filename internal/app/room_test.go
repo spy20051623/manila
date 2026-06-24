@@ -28,7 +28,7 @@ func TestFinishEndedRoomGameClearsSeatsAndReturnsToLobby(t *testing.T) {
 	svc.room.Seats[3] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
 	svc.room.Seats[4] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
 	svc.room.TempAI = map[int]bool{1: true}
-	svc.finishEndedRoomGameLocked(&model.Game{ID: "game-1", EventSeq: 42, FinalScores: scores})
+	svc.finishEndedRoomGameLocked(&svc.room, &model.Game{ID: "game-1", EventSeq: 42, FinalScores: scores})
 	svc.roomMu.Unlock()
 
 	view, err := svc.RoomView("alice")
@@ -141,9 +141,9 @@ func TestDisconnectInLobbyUnreadiesAndReleasesSeat(t *testing.T) {
 	}
 
 	svc.roomMu.Lock()
-	svc.stopOfflineReleaseLocked("alice")
+	svc.stopOfflineReleaseLocked(&svc.room, "alice")
 	svc.roomMu.Unlock()
-	svc.releaseOfflineSeat("alice")
+	svc.releaseOfflineSeat(defaultRoomID, "alice")
 	view, err = svc.RoomView("alice")
 	if err != nil {
 		t.Fatal(err)
@@ -174,9 +174,9 @@ func TestOfflineClaimSchedulesSeatRelease(t *testing.T) {
 	}
 
 	svc.roomMu.Lock()
-	svc.stopOfflineReleaseLocked("alice")
+	svc.stopOfflineReleaseLocked(&svc.room, "alice")
 	svc.roomMu.Unlock()
-	svc.releaseOfflineSeat("alice")
+	svc.releaseOfflineSeat(defaultRoomID, "alice")
 	view, err = svc.RoomView("alice")
 	if err != nil {
 		t.Fatal(err)
@@ -284,14 +284,14 @@ func TestReviewTimeoutConfirmsUnconfirmedHumans(t *testing.T) {
 	svc.room.Seats[2] = &roomSeat{Type: model.SeatTypeHuman, Token: "bob"}
 	svc.room.Seats[3] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
 	svc.room.Seats[4] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
-	svc.scheduleReviewTimeoutLocked(g)
+	svc.scheduleReviewTimeoutLocked(&svc.room, g)
 	if svc.room.TimeoutKind != roomTimeoutReview {
 		t.Fatalf("expected review timeout to be scheduled, got %q", svc.room.TimeoutKind)
 	}
-	svc.stopTimeoutLocked()
+	svc.stopTimeoutLocked(&svc.room)
 	svc.roomMu.Unlock()
 
-	svc.applyReviewTimeout(g.EventSeq)
+	svc.applyReviewTimeout(defaultRoomID, g.EventSeq)
 	if !g.Round.ConfirmedPlayers[2] {
 		t.Fatalf("expected unconfirmed player to be confirmed, got %+v", g.Round.ConfirmedPlayers)
 	}
@@ -311,7 +311,7 @@ func TestReviewTimeoutSkipsSingleHumanGame(t *testing.T) {
 	svc.room.Seats[2] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
 	svc.room.Seats[3] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
 	svc.room.Seats[4] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
-	svc.scheduleReviewTimeoutLocked(g)
+	svc.scheduleReviewTimeoutLocked(&svc.room, g)
 	if svc.room.TimeoutKind != "" {
 		t.Fatalf("expected single-human review to have no timeout, got %q", svc.room.TimeoutKind)
 	}
@@ -343,10 +343,10 @@ func TestRoundReviewClearsTemporaryAITakeover(t *testing.T) {
 	svc.room.TempAI = map[int]bool{1: true}
 	svc.roomMu.Unlock()
 
-	svc.processRoomAutomationStep()
+	svc.processRoomAutomationStep(defaultRoomID)
 	svc.roomMu.Lock()
 	defer svc.roomMu.Unlock()
-	svc.stopTimeoutLocked()
+	svc.stopTimeoutLocked(&svc.room)
 	if len(svc.room.TempAI) != 0 {
 		t.Fatalf("expected temporary AI takeover to stop at review, got %+v", svc.room.TempAI)
 	}
@@ -384,7 +384,7 @@ func TestAIRoundFromReviewTakesOverNextRound(t *testing.T) {
 
 	svc.roomMu.Lock()
 	defer svc.roomMu.Unlock()
-	svc.stopTimeoutLocked()
+	svc.stopTimeoutLocked(&svc.room)
 	if g.Phase == model.PhaseRoundReview {
 		t.Fatal("expected AI round confirm to advance to the next round")
 	}
@@ -427,7 +427,7 @@ func TestAIStepFromReviewOnlyConfirms(t *testing.T) {
 	}
 	svc.roomMu.Lock()
 	defer svc.roomMu.Unlock()
-	svc.stopTimeoutLocked()
+	svc.stopTimeoutLocked(&svc.room)
 	if action.Type != model.ActionConfirmRound || !g.Round.ConfirmedPlayers[1] {
 		t.Fatalf("expected AI step in review to confirm only, action=%+v confirmed=%+v", action, g.Round.ConfirmedPlayers)
 	}
@@ -443,7 +443,7 @@ func TestManualAIActionCountsAsHumanAction(t *testing.T) {
 	svc.room.HumanActionThisRound = false
 	svc.roomMu.Unlock()
 
-	svc.markHumanAction()
+	svc.markHumanAction(defaultRoomID)
 
 	svc.roomMu.Lock()
 	defer svc.roomMu.Unlock()
@@ -481,7 +481,7 @@ func TestManualConfirmCountsAsHumanAction(t *testing.T) {
 	}
 	svc.roomMu.Lock()
 	defer svc.roomMu.Unlock()
-	svc.stopTimeoutLocked()
+	svc.stopTimeoutLocked(&svc.room)
 	if !svc.room.HumanActionThisRound {
 		t.Fatal("expected manual confirm to count as human activity")
 	}

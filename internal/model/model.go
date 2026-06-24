@@ -286,9 +286,12 @@ type RoomParticipant struct {
 	Joined   bool   `json:"joined"`
 	PlayerID int    `json:"playerId,omitempty"`
 	Name     string `json:"name,omitempty"`
+	IsAdmin  bool   `json:"isAdmin,omitempty"`
 }
 
 type RoomView struct {
+	RoomID           string                 `json:"roomId,omitempty"`
+	Name             string                 `json:"name,omitempty"`
 	Status           RoomStatus             `json:"status"`
 	Seats            []RoomSeat             `json:"seats"`
 	Participant      RoomParticipant        `json:"participant"`
@@ -305,4 +308,24 @@ type RoomView struct {
 	CanAIForCurrent  bool                   `json:"canAIForCurrent"`
 	HumanPlayerCount int                    `json:"humanPlayerCount"`
 	CompletedGames   []CompletedGameSummary `json:"completedGames,omitempty"`
+}
+
+type RoomSummary struct {
+	RoomID           string     `json:"roomId"`
+	Name             string     `json:"name"`
+	Status           RoomStatus `json:"status"`
+	GameID           string     `json:"gameId,omitempty"`
+	HumanPlayerCount int        `json:"humanPlayerCount"`
+	AIPlayerCount    int        `json:"aiPlayerCount"`
+	SeatCount        int        `json:"seatCount"`
+	IsMember         bool       `json:"isMember,omitempty"`
+	IsOwner          bool       `json:"isOwner,omitempty"`
+	CanAdminClose    bool       `json:"canAdminClose,omitempty"`
+}
+
+type LobbyView struct {
+	Participant    RoomParticipant        `json:"participant"`
+	Rooms          []RoomSummary          `json:"rooms"`
+	SuggestedName  string                 `json:"suggestedName,omitempty"`
+	CompletedGames []CompletedGameSummary `json:"completedGames,omitempty"`
 }

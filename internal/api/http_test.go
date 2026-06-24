@@ -202,6 +202,146 @@ func TestGameActionEndpointTriggersRoomAutomation(t *testing.T) {
 	t.Fatalf("expected room automation to advance after game action endpoint, eventSeq remained %d", postedSeq)
 }
 
+func TestLobbyCreateRoomRequiresGlobalToken(t *testing.T) {
+	svc := app.NewService(store.NewMemoryStore(), rules.NewEngine())
+	h := NewHandler(svc)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	state := roomRequest(t, mux, http.MethodGet, "/lobby/state", "", nil)
+	lobby := state["lobby"].(map[string]interface{})
+	participant := lobby["participant"].(map[string]interface{})
+	if participant["joined"] == true {
+		t.Fatalf("unauthenticated lobby view should not be joined: %s", state)
+	}
+
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/rooms", nil)
+	mux.ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("expected room creation without token to fail, status %d body %s", res.Code, res.Body.String())
+	}
+
+	token := lobbyJoinNamed(t, mux, "Lobby Alice")
+	created := roomRequest(t, mux, http.MethodPost, "/rooms", token, nil)
+	if created["roomId"] == "" {
+		t.Fatalf("expected created room id: %s", created)
+	}
+	room := created["room"].(map[string]interface{})
+	if room["roomId"] != created["roomId"] {
+		t.Fatalf("expected created room payload to include room id: %s", created)
+	}
+	participant = room["participant"].(map[string]interface{})
+	if playerID, ok := participant["playerId"].(float64); ok && playerID != 0 {
+		t.Fatalf("creator should enter room without taking a seat: %s", created)
+	}
+}
+
+func TestRoomScopedSeatsAndGameActions(t *testing.T) {
+	svc := app.NewService(store.NewMemoryStore(), rules.NewEngine())
+	h := NewHandler(svc)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	token := lobbyJoinNamed(t, mux, "Scoped Alice")
+	created := roomRequest(t, mux, http.MethodPost, "/rooms", token, nil)
+	roomID := created["roomId"].(string)
+	base := "/rooms/" + roomID
+
+	roomRequest(t, mux, http.MethodPost, base+"/seats/1/claim", token, nil)
+	roomRequest(t, mux, http.MethodPost, base+"/seats/2/ai", token, nil)
+	roomRequest(t, mux, http.MethodPost, base+"/seats/3/ai", token, nil)
+	roomRequest(t, mux, http.MethodPost, base+"/seats/4/ai", token, nil)
+	started := roomRequest(t, mux, http.MethodPost, base+"/ready", token, nil)
+	room := started["room"].(map[string]interface{})
+	if room["status"] != "inProgress" {
+		t.Fatalf("expected scoped room to start, got %s", started)
+	}
+	gameID := room["gameId"].(string)
+
+	actions := roomRequest(t, mux, http.MethodGet, "/games/"+gameID+"/actions", token, nil)
+	if len(actions["actions"].([]interface{})) == 0 {
+		t.Fatalf("expected game actions to resolve through room mapping, got %s", actions)
+	}
+}
+
+func TestMultipleRoomsKeepSeatsIsolated(t *testing.T) {
+	svc := app.NewService(store.NewMemoryStore(), rules.NewEngine())
+	h := NewHandler(svc)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	alice := lobbyJoinNamed(t, mux, "Multi Alice")
+	bob := lobbyJoinNamed(t, mux, "Multi Bob")
+	aliceRoom := roomRequest(t, mux, http.MethodPost, "/rooms", alice, nil)["roomId"].(string)
+	bobRoom := roomRequest(t, mux, http.MethodPost, "/rooms", bob, nil)["roomId"].(string)
+
+	roomRequest(t, mux, http.MethodPost, "/rooms/"+aliceRoom+"/seats/1/claim", alice, nil)
+	roomRequest(t, mux, http.MethodPost, "/rooms/"+bobRoom+"/seats/1/claim", bob, nil)
+
+	aliceView := roomRequest(t, mux, http.MethodGet, "/rooms/"+aliceRoom+"/state", alice, nil)["room"].(map[string]interface{})
+	bobView := roomRequest(t, mux, http.MethodGet, "/rooms/"+bobRoom+"/state", bob, nil)["room"].(map[string]interface{})
+	aliceSeats := aliceView["seats"].([]interface{})
+	bobSeats := bobView["seats"].([]interface{})
+	if !aliceSeats[0].(map[string]interface{})["isYou"].(bool) {
+		t.Fatalf("expected Alice to own P1 in her room: %s", aliceView)
+	}
+	if !bobSeats[0].(map[string]interface{})["isYou"].(bool) {
+		t.Fatalf("expected Bob to own P1 in his room: %s", bobView)
+	}
+}
+
+func TestAdminCloseRoomRemovesRoomAndStopsActions(t *testing.T) {
+	svc := app.NewService(store.NewMemoryStore(), rules.NewEngine())
+	h := NewHandler(svc)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	token := lobbyJoinNamed(t, mux, "Admin Target")
+	created := roomRequest(t, mux, http.MethodPost, "/rooms", token, nil)
+	roomID := created["roomId"].(string)
+	base := "/rooms/" + roomID
+	roomRequest(t, mux, http.MethodPost, base+"/seats/1/claim", token, nil)
+	roomRequest(t, mux, http.MethodPost, base+"/seats/2/ai", token, nil)
+	roomRequest(t, mux, http.MethodPost, base+"/seats/3/ai", token, nil)
+	roomRequest(t, mux, http.MethodPost, base+"/seats/4/ai", token, nil)
+	started := roomRequest(t, mux, http.MethodPost, base+"/ready", token, nil)
+	gameID := started["room"].(map[string]interface{})["gameId"].(string)
+
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, base+"/admin/close", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	mux.ServeHTTP(res, req)
+	if res.Code != http.StatusForbidden {
+		t.Fatalf("expected player admin close to fail, status %d body %s", res.Code, res.Body.String())
+	}
+
+	roomRequest(t, mux, http.MethodPost, base+"/admin/close", svc.AdminToken(), nil)
+	lobbyPayload := roomRequest(t, mux, http.MethodGet, "/lobby/state", svc.AdminToken(), nil)
+	rooms := lobbyPayload["lobby"].(map[string]interface{})["rooms"].([]interface{})
+	for _, item := range rooms {
+		if item.(map[string]interface{})["roomId"] == roomID {
+			t.Fatalf("closed room should be absent from lobby: %s", lobbyPayload)
+		}
+	}
+
+	res = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/games/"+gameID+"/actions", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	mux.ServeHTTP(res, req)
+	if res.Code != http.StatusForbidden {
+		t.Fatalf("expected closed room actions to be forbidden, status %d body %s", res.Code, res.Body.String())
+	}
+	body := bytes.NewBufferString(`{"playerId":1,"type":"PassBid"}`)
+	res = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/games/"+gameID+"/actions", body)
+	req.Header.Set("Authorization", "Bearer "+token)
+	mux.ServeHTTP(res, req)
+	if res.Code != http.StatusForbidden {
+		t.Fatalf("expected closed room action to fail, status %d body %s", res.Code, res.Body.String())
+	}
+}
+
 func TestRoomJoinRejectsDuplicateNames(t *testing.T) {
 	svc := app.NewService(store.NewMemoryStore(), rules.NewEngine())
 	h := NewHandler(svc)
@@ -280,6 +420,20 @@ func roomJoinNamed(t *testing.T, mux *http.ServeMux, name string) string {
 		body = bytes.NewBufferString(`{"name":"` + name + `"}`)
 	}
 	payload := roomRequest(t, mux, http.MethodPost, "/room/join", "", body)
+	token, ok := payload["token"].(string)
+	if !ok || token == "" {
+		t.Fatalf("expected token in %s", payload)
+	}
+	return token
+}
+
+func lobbyJoinNamed(t *testing.T, mux *http.ServeMux, name string) string {
+	t.Helper()
+	body := bytes.NewBufferString(`{}`)
+	if name != "" {
+		body = bytes.NewBufferString(`{"name":"` + name + `"}`)
+	}
+	payload := roomRequest(t, mux, http.MethodPost, "/lobby/join", "", body)
 	token, ok := payload["token"].(string)
 	if !ok || token == "" {
 		t.Fatalf("expected token in %s", payload)

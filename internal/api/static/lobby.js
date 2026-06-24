@@ -1,8 +1,14 @@
+let lobby = null;
 let room = null;
+let lobbySocket = null;
 let roomSocket = null;
-let reconnectTimer = null;
-let roomToken = new URLSearchParams(window.location.search).get("token") || localStorage.getItem("manilaRoomToken") || "";
+let lobbyReconnectTimer = null;
+let roomReconnectTimer = null;
 let toastTimer = null;
+
+const params = new URLSearchParams(window.location.search);
+let selectedRoomId = params.get("room") || "";
+let roomToken = params.get("token") || localStorage.getItem("manilaRoomToken") || "";
 
 const MAX_PLAYER_NAME_LENGTH = 12;
 const playerOrder = [1, 2, 3, 4];
@@ -20,55 +26,165 @@ async function api(path, options = {}) {
 }
 
 async function refresh() {
-  const data = await api("/room/state");
-  applyRoom(data.room || null);
+  const lobbyData = await api("/lobby/state");
+  applyLobby(lobbyData.lobby || null);
+  if (selectedRoomId) {
+    try {
+      const roomData = await api(`/rooms/${encodeURIComponent(selectedRoomId)}/state`);
+      applyRoom(roomData.room || null);
+    } catch (err) {
+      selectedRoomId = "";
+      room = null;
+      syncTokenToURL();
+      connectRoomSocket();
+      renderLobby();
+      showError(err);
+    }
+  } else {
+    room = null;
+    renderLobby();
+  }
 }
 
-function applyRoom(nextRoom) {
-  room = nextRoom || null;
-  if (!room?.participant?.joined && roomToken) {
+function applyLobby(nextLobby) {
+  lobby = nextLobby || null;
+  if (roomToken && lobby && !lobby.participant?.joined) {
     clearRoomToken();
-  } else if (room?.participant?.joined) {
+  } else if (lobby?.participant?.joined) {
     syncTokenToURL();
+  }
+  if (selectedRoomId && lobby && !lobby.rooms?.some((item) => item.roomId === selectedRoomId)) {
+    selectedRoomId = "";
+    room = null;
+    syncTokenToURL();
+    connectRoomSocket();
+    showToast("房间已关闭");
   }
   renderLobby();
 }
 
+function applyRoom(nextRoom) {
+  room = nextRoom || null;
+  if (room?.roomId && room.roomId !== selectedRoomId) {
+    selectedRoomId = room.roomId;
+    syncTokenToURL();
+  }
+  if (roomToken && room && !room.participant?.joined && !isAdmin()) {
+    clearRoomToken();
+  }
+  renderLobby();
+}
+
+function connectLobbySocket() {
+  clearTimeout(lobbyReconnectTimer);
+  if (lobbySocket) {
+    lobbySocket.onclose = null;
+    lobbySocket.close();
+  }
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const url = `${protocol}//${window.location.host}/lobby/ws?token=${encodeURIComponent(roomToken || "")}`;
+  lobbySocket = new WebSocket(url);
+  lobbySocket.onmessage = (event) => {
+    const data = JSON.parse(event.data || "{}");
+    applyLobby(data.lobby || null);
+  };
+  lobbySocket.onclose = () => {
+    lobbyReconnectTimer = setTimeout(connectLobbySocket, 1200);
+  };
+}
+
 function connectRoomSocket() {
-  clearTimeout(reconnectTimer);
+  clearTimeout(roomReconnectTimer);
   if (roomSocket) {
     roomSocket.onclose = null;
     roomSocket.close();
+    roomSocket = null;
   }
+  if (!selectedRoomId) return;
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const url = `${protocol}//${window.location.host}/room/ws?token=${encodeURIComponent(roomToken || "")}`;
+  const url = `${protocol}//${window.location.host}/rooms/${encodeURIComponent(selectedRoomId)}/ws?token=${encodeURIComponent(roomToken || "")}`;
   roomSocket = new WebSocket(url);
   roomSocket.onmessage = (event) => {
     const data = JSON.parse(event.data || "{}");
-    applyRoom(data.room || null);
+    if (data.room) applyRoom(data.room);
   };
   roomSocket.onclose = () => {
-    reconnectTimer = setTimeout(connectRoomSocket, 1200);
+    roomReconnectTimer = setTimeout(connectRoomSocket, 1200);
   };
 }
 
 function renderLobby() {
-  const joined = Boolean(room?.participant?.joined);
+  const joined = Boolean(lobby?.participant?.joined);
+  const admin = isAdmin();
   $("lobbyJoinBtn").hidden = joined;
-  $("lobbyRenameBtn").hidden = !joined;
-  $("lobbyStatusText").textContent = roomStatusText();
+  $("lobbyRenameBtn").hidden = !joined || admin;
+  $("lobbyCreateRoomBtn").hidden = admin || !joined || Boolean(selectedRoomId);
+  $("lobbyBackBtn").hidden = !selectedRoomId;
+  $("lobbyStatusText").textContent = selectedRoomId ? roomStatusText() : "大厅";
   $("lobbyJoinedText").textContent = participantText();
-  $("lobbySeats").innerHTML = playerOrder.map(lobbySeatHTML).join("");
-  $("lobbySeats").querySelectorAll("[data-room-action]").forEach((button) => {
-    button.onclick = () => handleLobbyAction(button.dataset.roomAction, Number(button.dataset.playerId)).catch(showError);
-  });
+  $("roomListSection").hidden = Boolean(selectedRoomId);
+  document.querySelector(".lobby-seat-zone").hidden = !selectedRoomId;
+
+  if (selectedRoomId) {
+    $("lobbySeats").innerHTML = playerOrder.map(lobbySeatHTML).join("");
+    $("lobbySeats").querySelectorAll("[data-room-action]").forEach((button) => {
+      button.onclick = () => handleLobbyAction(button.dataset.roomAction, Number(button.dataset.playerId)).catch(showError);
+    });
+  } else {
+    $("lobbySeats").innerHTML = "";
+  }
+  renderRoomList();
   renderGameOverlay();
   renderCompletedGames();
 }
 
+function renderRoomList() {
+  const list = $("roomList");
+  const rooms = Array.isArray(lobby?.rooms) ? lobby.rooms : [];
+  if (selectedRoomId) {
+    list.innerHTML = "";
+    return;
+  }
+  if (!rooms.length) {
+    list.innerHTML = `<div class="completed-games-empty">还没有房间</div>`;
+    return;
+  }
+  list.innerHTML = rooms.map(roomCardHTML).join("");
+  list.querySelectorAll("[data-room-enter]").forEach((button) => {
+    button.onclick = () => enterRoom(button.dataset.roomEnter).catch(showError);
+  });
+  list.querySelectorAll("[data-room-close]").forEach((button) => {
+    button.onclick = () => adminCloseRoom(button.dataset.roomClose).catch(showError);
+  });
+}
+
+function roomCardHTML(summary) {
+  const status = roomSummaryStatus(summary);
+  const adminClose = summary.canAdminClose
+    ? `<button data-room-close="${escapeHTML(summary.roomId || "")}" type="button">强制关闭</button>`
+    : "";
+  return `<article class="room-card">
+    <div>
+      <div class="room-card-title">${escapeHTML(summary.name || summary.roomId || "房间")}</div>
+      <div class="room-card-meta">${Number(summary.humanPlayerCount || 0)} 人 / ${Number(summary.aiPlayerCount || 0)} AI · ${Number(summary.seatCount || 0)}/4 座</div>
+    </div>
+    <div class="room-card-actions">
+      <span class="room-status-pill ${escapeHTML(summary.status || "")}">${escapeHTML(status)}</span>
+      <button data-room-enter="${escapeHTML(summary.roomId || "")}" type="button">${summary.isMember ? "进入" : "加入"}</button>
+      ${adminClose}
+    </div>
+  </article>`;
+}
+
+function roomSummaryStatus(summary) {
+  if (summary.status === "inProgress") return "对局中";
+  if (summary.status === "closing") return "关闭中";
+  return "等待中";
+}
+
 function renderGameOverlay() {
   const overlay = $("lobbyGameOverlay");
-  const inProgress = room?.status === "inProgress" && room?.gameId;
+  const inProgress = selectedRoomId && room?.status === "inProgress" && room?.gameId;
   overlay.hidden = !inProgress;
   $("enterGameBtn").onclick = () => {
     if (!room?.gameId) return;
@@ -78,9 +194,9 @@ function renderGameOverlay() {
 
 function renderCompletedGames() {
   const list = $("completedGamesList");
-  const games = Array.isArray(room?.completedGames) ? room.completedGames : [];
+  const games = Array.isArray(lobby?.completedGames) ? lobby.completedGames : [];
   if (!games.length) {
-    list.innerHTML = `<div class="completed-games-empty">暂无已完成对局</div>`;
+    list.innerHTML = `<div class="completed-games-empty">还没有结束的对局</div>`;
     return;
   }
   list.innerHTML = games.map(completedGameHTML).join("");
@@ -96,32 +212,33 @@ function completedGameHTML(game) {
   scores.sort((a, b) => Number(a.rank || 99) - Number(b.rank || 99));
   const scoreText = scores.length
     ? scores.map((score) => `第${Number(score.rank || 0)}名 P${Number(score.playerId || 0)} ${Number(score.wealth || 0)}分`).join(" · ")
-    : "暂无结算分数";
+    : "结算待生成";
   const roundText = game.roundNumber ? `第 ${Number(game.roundNumber)} 轮结束` : "终局";
   return `<button class="completed-game-card" data-game-id="${escapeHTML(game.gameId || "")}" type="button">
-    <span class="completed-game-title">${escapeHTML(game.gameId || "旧对局")}</span>
+    <span class="completed-game-title">${escapeHTML(game.gameId || "历史对局")}</span>
     <span class="completed-game-round">${escapeHTML(roundText)}</span>
     <span class="completed-game-scores">${escapeHTML(scoreText)}</span>
   </button>`;
 }
 
 function gameURL(gameId) {
-  const tokenParam = roomToken ? `&token=${encodeURIComponent(roomToken)}` : "";
-  return `/game.html?game=${encodeURIComponent(gameId)}${tokenParam}`;
+  const url = new URL("/game.html", window.location.origin);
+  url.searchParams.set("game", gameId);
+  if (roomToken) url.searchParams.set("token", roomToken);
+  if (selectedRoomId) url.searchParams.set("room", selectedRoomId);
+  return `${url.pathname}${url.search}`;
 }
 
 function roomStatusText() {
   if (!room) return "正在连接房间";
-  if (room.status === "inProgress") return "对局进行中";
-  if (room.status === "closing") return `${room.closeReason || "房间关闭中"} · ${room.closingSeconds || 0}s`;
-  return "准备大厅";
+  return room.name || "房间";
 }
 
 function participantText() {
-  if (!room?.participant?.joined) return "观战身份";
-  const name = room.participant.name || "玩家";
-  const playerId = Number(room.participant.playerId || 0);
-  return playerId ? `${name} · P${playerId}` : `${name} · 尚未选择座位`;
+  if (isAdmin()) return "管理员";
+  const participant = lobby?.participant;
+  if (!participant?.joined) return "观战身份";
+  return participant.name || "玩家";
 }
 
 function lobbySeatHTML(id) {
@@ -129,7 +246,7 @@ function lobbySeatHTML(id) {
   const isYou = Boolean(seat.isYou);
   const online = seat.type !== "human" || seat.online !== false;
   const controls = lobbySeatControls(id, seat, isYou);
-  return `<article class="lobby-seat ${seat.type} ${isYou ? "you" : ""} ${online ? "" : "offline"}">
+  return `<article class="lobby-seat ${escapeHTML(seat.type)} ${isYou ? "you" : ""} ${online ? "" : "offline"}">
     <div class="lobby-seat-head"><span>P${id}</span><strong title="${escapeHTML(seatLabel(seat, isYou))}">${escapeHTML(seatLabel(seat, isYou))}</strong></div>
     <div class="lobby-seat-state">${escapeHTML(seatStateText(seat, online))}</div>
     <div class="lobby-seat-actions">${controls.join("")}</div>
@@ -137,7 +254,7 @@ function lobbySeatHTML(id) {
 }
 
 function lobbySeatControls(id, seat, isYou) {
-  if (room?.status !== "waiting" || !room?.participant?.joined) return [];
+  if (isAdmin() || room?.status !== "waiting" || !room?.participant?.joined) return [];
   const seated = Number(room?.participant?.playerId || 0);
   const canCancelReady = Boolean(room?.canCancelReady);
   const controls = [];
@@ -178,34 +295,87 @@ function seatStateText(seat, online) {
 }
 
 async function handleLobbyAction(action, playerId) {
-  if (action === "claim") await api(`/room/seats/${playerId}/claim`, { method: "POST" });
-  if (action === "leave") await api(`/room/seats/${playerId}/leave`, { method: "POST" });
-  if (action === "ready") await api("/room/ready", { method: "POST" });
-  if (action === "unready") await api("/room/unready", { method: "POST" });
-  if (action === "addAI") await api(`/room/seats/${playerId}/ai`, { method: "POST" });
-  if (action === "removeAI") await api(`/room/seats/${playerId}/ai`, { method: "DELETE" });
+  await ensurePlayerToken();
+  if (!selectedRoomId) throw new Error("请先进入房间");
+  const base = `/rooms/${encodeURIComponent(selectedRoomId)}`;
+  if (action === "claim") await api(`${base}/seats/${playerId}/claim`, { method: "POST" });
+  if (action === "leave") await api(`${base}/seats/${playerId}/leave`, { method: "POST" });
+  if (action === "ready") await api(`${base}/ready`, { method: "POST" });
+  if (action === "unready") await api(`${base}/unready`, { method: "POST" });
+  if (action === "addAI") await api(`${base}/seats/${playerId}/ai`, { method: "POST" });
+  if (action === "removeAI") await api(`${base}/seats/${playerId}/ai`, { method: "DELETE" });
   await refresh();
 }
 
-async function joinRoom() {
-  const latest = await api("/room/state");
-  const suggested = latest.room?.suggestedName || "Player 1";
+async function joinLobby() {
+  await ensurePlayerToken({ forceNameDialog: true });
+}
+
+async function ensurePlayerToken(options = {}) {
+  if (isAdmin()) throw new Error("管理员身份不能进行玩家操作");
+  if (roomToken && lobby?.participant?.joined && !options.forceNameDialog) return true;
+  const latest = await api("/lobby/state");
+  applyLobby(latest.lobby || null);
+  if (roomToken && lobby?.participant?.joined && !options.forceNameDialog) return true;
+  const suggested = latest.lobby?.suggestedName || "Player 1";
   const name = await openNameDialog({ mode: "join", initialName: suggested });
-  if (!name) return;
-  const data = await api("/room/join", { method: "POST", body: JSON.stringify({ name }) });
+  if (!name) return false;
+  const data = await api("/lobby/join", { method: "POST", body: JSON.stringify({ name }) });
   roomToken = data.token || "";
   if (roomToken) localStorage.setItem("manilaRoomToken", roomToken);
   syncTokenToURL();
+  connectLobbySocket();
+  applyLobby(data.lobby || null);
+  return true;
+}
+
+async function createRoom() {
+  if (!(await ensurePlayerToken())) return;
+  const data = await api("/rooms", { method: "POST" });
+  selectedRoomId = data.roomId || data.room?.roomId || "";
+  room = data.room || null;
+  syncTokenToURL();
   connectRoomSocket();
-  applyRoom(data.room || null);
+  await refresh();
+}
+
+async function enterRoom(roomID) {
+  if (!(await ensurePlayerToken())) return;
+  await api(`/rooms/${encodeURIComponent(roomID)}/join`, { method: "POST" });
+  selectedRoomId = roomID;
+  syncTokenToURL();
+  connectRoomSocket();
+  await refresh();
+}
+
+async function adminCloseRoom(roomID) {
+  if (!isAdmin()) throw new Error("需要管理员身份");
+  await api(`/rooms/${encodeURIComponent(roomID)}/admin/close`, { method: "POST" });
+  if (selectedRoomId === roomID) {
+    selectedRoomId = "";
+    room = null;
+    syncTokenToURL();
+    connectRoomSocket();
+  }
+  await refresh();
+}
+
+function backToLobby() {
+  selectedRoomId = "";
+  room = null;
+  syncTokenToURL();
+  connectRoomSocket();
+  renderLobby();
 }
 
 async function renameRoomParticipant() {
-  const current = room?.participant?.name || "";
+  if (isAdmin()) return;
+  const current = lobby?.participant?.name || "";
   const name = await openNameDialog({ mode: "rename", initialName: current });
   if (!name) return;
-  const data = await api("/room/name", { method: "PATCH", body: JSON.stringify({ name }) });
-  applyRoom(data.room || null);
+  const data = await api("/lobby/name", { method: "PATCH", body: JSON.stringify({ name }) });
+  applyLobby(data.lobby || null);
+  if (selectedRoomId) await refresh();
 }
 
 function openNameDialog({ mode, initialName }) {
@@ -234,18 +404,22 @@ function updateNameCounter() {
 }
 
 function syncTokenToURL() {
-  if (!roomToken) return;
   const url = new URL(window.location.href);
-  url.searchParams.set("token", roomToken);
+  if (roomToken) url.searchParams.set("token", roomToken);
+  else url.searchParams.delete("token");
+  if (selectedRoomId) url.searchParams.set("room", selectedRoomId);
+  else url.searchParams.delete("room");
   window.history.replaceState(null, "", url);
 }
 
 function clearRoomToken() {
   roomToken = "";
   localStorage.removeItem("manilaRoomToken");
-  const url = new URL(window.location.href);
-  url.searchParams.delete("token");
-  window.history.replaceState(null, "", url);
+  syncTokenToURL();
+}
+
+function isAdmin() {
+  return Boolean(lobby?.participant?.isAdmin);
 }
 
 function showError(err) {
@@ -268,8 +442,10 @@ function escapeHTML(value) {
     .replaceAll('"', "&quot;");
 }
 
-$("lobbyJoinBtn").onclick = () => joinRoom().catch(showError);
+$("lobbyJoinBtn").onclick = () => joinLobby().catch(showError);
 $("lobbyRenameBtn").onclick = () => renameRoomParticipant().catch(showError);
+$("lobbyCreateRoomBtn").onclick = () => createRoom().catch(showError);
+$("lobbyBackBtn").onclick = backToLobby;
 $("nameDialogInput").addEventListener("input", updateNameCounter);
 $("nameDialogCloseBtn").onclick = () => closeNameDialog("");
 $("nameDialogCancelBtn").onclick = () => closeNameDialog("");
@@ -286,5 +462,6 @@ $("nameDialogForm").addEventListener("submit", (event) => {
   closeNameDialog(value);
 });
 
+connectLobbySocket();
 connectRoomSocket();
 refresh().catch(showError);

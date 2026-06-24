@@ -11,21 +11,27 @@
     <section class="lobby-panel" aria-label="联机大厅">
       <div class="lobby-head">
         <div>
-          <p id="lobbyStatusText">准备大厅</p>
+          <p id="lobbyStatusText">大厅</p>
           <h1>马尼拉</h1>
         </div>
         <div class="lobby-identity">
           <span id="lobbyJoinedText">观战身份</span>
           <button id="lobbyRenameBtn" type="button" hidden>更改名字</button>
-          <button id="lobbyJoinBtn" type="button">加入房间</button>
+          <button id="lobbyBackBtn" type="button" hidden>返回大厅</button>
+          <button id="lobbyJoinBtn" type="button">加入大厅</button>
+          <button id="lobbyCreateRoomBtn" type="button">新建房间</button>
         </div>
       </div>
+
+      <section id="roomListSection" class="room-list-section" aria-label="房间列表">
+        <div id="roomList" class="room-list"></div>
+      </section>
 
       <div class="lobby-seat-zone">
         <div id="lobbySeats" class="lobby-seats"></div>
         <div id="lobbyGameOverlay" class="lobby-game-overlay" hidden>
           <div class="lobby-game-overlay-panel">
-            <strong>当前有对局正在进行</strong>
+            <strong>对局进行中</strong>
             <button id="enterGameBtn" type="button">进入对局</button>
           </div>
         </div>
@@ -33,8 +39,8 @@
 
       <section class="completed-games-section" aria-label="已完成对局">
         <div class="completed-games-head">
-          <h2>已完成对局</h2>
-          <span>点击任意记录可查看旧对局</span>
+          <h2>历史对局</h2>
+          <span>可回看已结束的对局</span>
         </div>
         <div id="completedGamesList" class="completed-games-list"></div>
       </section>
@@ -53,14 +59,14 @@
       <div class="name-dialog-footer">
         <span id="nameDialogCounter">0/12</span>
         <div class="name-dialog-actions">
-          <button id="nameDialogCancelBtn" type="button">取消</button>
           <button id="nameDialogSubmitBtn" type="submit">确认</button>
+          <button id="nameDialogCancelBtn" type="button">取消</button>
         </div>
       </div>
     </form>
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/lobby.js?v=lobby-3" defer></script>
+  <script src="/lobby.js?v=lobby-5" defer></script>
 </body>
 </html>

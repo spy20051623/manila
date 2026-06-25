@@ -9,8 +9,15 @@ import (
 	"manila/internal/store"
 )
 
+func defaultRoomForTest(svc *Service) *roomState {
+	room := newRoomState(defaultRoomID, "Test Room", "")
+	svc.rooms[room.ID] = &room
+	return &room
+}
+
 func TestFinishEndedRoomGameClearsSeatsAndReturnsToLobby(t *testing.T) {
 	svc := NewService(store.NewMemoryStore(), rules.NewEngine())
+	room := defaultRoomForTest(svc)
 
 	scores := []model.Score{
 		{PlayerID: 1, Wealth: 128, Rank: 1},
@@ -20,16 +27,16 @@ func TestFinishEndedRoomGameClearsSeatsAndReturnsToLobby(t *testing.T) {
 	}
 
 	svc.roomMu.Lock()
-	svc.room.Status = model.RoomStatusInProgress
-	svc.room.ActiveGameID = "game-1"
-	svc.room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Online: true}
-	svc.room.Participants["bob"] = &roomParticipant{Token: "bob", Name: "Bob", Online: true}
-	svc.room.Seats[1] = &roomSeat{Type: model.SeatTypeHuman, Token: "alice", Ready: true}
-	svc.room.Seats[2] = &roomSeat{Type: model.SeatTypeHuman, Token: "bob", Ready: true}
-	svc.room.Seats[3] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
-	svc.room.Seats[4] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
-	svc.room.TempAI = map[int]bool{1: true}
-	svc.finishEndedRoomGameLocked(&svc.room, &model.Game{ID: "game-1", EventSeq: 42, FinalScores: scores})
+	room.Status = model.RoomStatusInProgress
+	room.ActiveGameID = "game-1"
+	room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Online: true}
+	room.Participants["bob"] = &roomParticipant{Token: "bob", Name: "Bob", Online: true}
+	room.Seats[1] = &roomSeat{Type: model.SeatTypeHuman, Token: "alice", Ready: true}
+	room.Seats[2] = &roomSeat{Type: model.SeatTypeHuman, Token: "bob", Ready: true}
+	room.Seats[3] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
+	room.Seats[4] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
+	room.TempAI = map[int]bool{1: true}
+	svc.finishEndedRoomGameLocked(room, &model.Game{ID: "game-1", EventSeq: 42, FinalScores: scores})
 	svc.roomMu.Unlock()
 
 	view, err := svc.RoomView("alice")
@@ -59,6 +66,7 @@ func TestFinishEndedRoomGameClearsSeatsAndReturnsToLobby(t *testing.T) {
 func TestRoomViewDoesNotFinalizeEndedActiveGame(t *testing.T) {
 	st := store.NewMemoryStore()
 	svc := NewService(st, rules.NewEngine())
+	room := defaultRoomForTest(svc)
 	g := &model.Game{
 		ID:          "game-1",
 		Status:      model.StatusEnded,
@@ -68,13 +76,13 @@ func TestRoomViewDoesNotFinalizeEndedActiveGame(t *testing.T) {
 	st.Put(g)
 
 	svc.roomMu.Lock()
-	svc.room.Status = model.RoomStatusInProgress
-	svc.room.ActiveGameID = "game-1"
-	svc.room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Online: true}
-	svc.room.Seats[1] = &roomSeat{Type: model.SeatTypeHuman, Token: "alice", Ready: true}
-	svc.room.Seats[2] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
-	svc.room.Seats[3] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
-	svc.room.Seats[4] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
+	room.Status = model.RoomStatusInProgress
+	room.ActiveGameID = "game-1"
+	room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Online: true}
+	room.Seats[1] = &roomSeat{Type: model.SeatTypeHuman, Token: "alice", Ready: true}
+	room.Seats[2] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
+	room.Seats[3] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
+	room.Seats[4] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
 	svc.roomMu.Unlock()
 
 	view, err := svc.RoomView("alice")
@@ -108,7 +116,7 @@ func TestRoomViewIncludesCompletedGamesNewestFirst(t *testing.T) {
 		Status: model.StatusInProgress,
 	})
 
-	view, err := svc.RoomView("")
+	view, err := svc.LobbyView("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,10 +133,11 @@ func TestRoomViewIncludesCompletedGamesNewestFirst(t *testing.T) {
 
 func TestDisconnectInLobbyUnreadiesAndReleasesSeat(t *testing.T) {
 	svc := NewService(store.NewMemoryStore(), rules.NewEngine())
+	room := defaultRoomForTest(svc)
 
 	svc.roomMu.Lock()
-	svc.room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Connections: 1, Online: true}
-	svc.room.Seats[1] = &roomSeat{Type: model.SeatTypeHuman, Token: "alice", Ready: true}
+	room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Connections: 1, Online: true}
+	room.Seats[1] = &roomSeat{Type: model.SeatTypeHuman, Token: "alice", Ready: true}
 	svc.roomMu.Unlock()
 
 	svc.DisconnectRoomParticipant("alice")
@@ -142,7 +151,7 @@ func TestDisconnectInLobbyUnreadiesAndReleasesSeat(t *testing.T) {
 	}
 
 	svc.roomMu.Lock()
-	svc.stopOfflineReleaseLocked(&svc.room, "alice")
+	svc.stopOfflineReleaseLocked(room, "alice")
 	svc.roomMu.Unlock()
 	svc.releaseOfflineSeat(defaultRoomID, "alice")
 	view, err = svc.RoomView("alice")
@@ -157,9 +166,10 @@ func TestDisconnectInLobbyUnreadiesAndReleasesSeat(t *testing.T) {
 
 func TestOfflineClaimSchedulesSeatRelease(t *testing.T) {
 	svc := NewService(store.NewMemoryStore(), rules.NewEngine())
+	room := defaultRoomForTest(svc)
 
 	svc.roomMu.Lock()
-	svc.room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice"}
+	room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice"}
 	svc.roomMu.Unlock()
 
 	if err := svc.ClaimSeat("alice", 1); err != nil {
@@ -175,7 +185,7 @@ func TestOfflineClaimSchedulesSeatRelease(t *testing.T) {
 	}
 
 	svc.roomMu.Lock()
-	svc.stopOfflineReleaseLocked(&svc.room, "alice")
+	svc.stopOfflineReleaseLocked(room, "alice")
 	svc.roomMu.Unlock()
 	svc.releaseOfflineSeat(defaultRoomID, "alice")
 	view, err = svc.RoomView("alice")
@@ -190,9 +200,10 @@ func TestOfflineClaimSchedulesSeatRelease(t *testing.T) {
 
 func TestJoinedUnseatedParticipantCanManageAI(t *testing.T) {
 	svc := NewService(store.NewMemoryStore(), rules.NewEngine())
+	room := defaultRoomForTest(svc)
 
 	svc.roomMu.Lock()
-	svc.room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Online: true}
+	room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Online: true}
 	svc.roomMu.Unlock()
 
 	if err := svc.PlaceAI("alice", 2); err != nil {
@@ -224,10 +235,11 @@ func TestJoinedUnseatedParticipantCanManageAI(t *testing.T) {
 
 func TestReadyParticipantCannotManageAI(t *testing.T) {
 	svc := NewService(store.NewMemoryStore(), rules.NewEngine())
+	room := defaultRoomForTest(svc)
 
 	svc.roomMu.Lock()
-	svc.room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Online: true}
-	svc.room.Seats[1] = &roomSeat{Type: model.SeatTypeHuman, Token: "alice", Ready: true}
+	room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Online: true}
+	room.Seats[1] = &roomSeat{Type: model.SeatTypeHuman, Token: "alice", Ready: true}
 	svc.roomMu.Unlock()
 
 	if err := svc.PlaceAI("alice", 2); err == nil {
@@ -244,9 +256,10 @@ func TestReadyParticipantCannotManageAI(t *testing.T) {
 
 func TestAllAISeatsDoNotStartRoomGame(t *testing.T) {
 	svc := NewService(store.NewMemoryStore(), rules.NewEngine())
+	room := defaultRoomForTest(svc)
 
 	svc.roomMu.Lock()
-	svc.room.Participants["host"] = &roomParticipant{Token: "host", Name: "Host", Online: true}
+	room.Participants["host"] = &roomParticipant{Token: "host", Name: "Host", Online: true}
 	svc.roomMu.Unlock()
 
 	for _, playerID := range model.PlayerOrder {
@@ -273,6 +286,7 @@ func TestReviewTimeoutConfirmsUnconfirmedHumans(t *testing.T) {
 	st := store.NewMemoryStore()
 	eng := rules.NewEngine()
 	svc := NewService(st, eng)
+	room := defaultRoomForTest(svc)
 	g := rules.NewGame("game-1", 1)
 	if err := eng.StartGame(g); err != nil {
 		t.Fatal(err)
@@ -283,23 +297,23 @@ func TestReviewTimeoutConfirmsUnconfirmedHumans(t *testing.T) {
 	st.Put(g)
 
 	svc.roomMu.Lock()
-	svc.room.Status = model.RoomStatusInProgress
-	svc.room.ActiveGameID = "game-1"
-	svc.room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Online: true}
-	svc.room.Participants["bob"] = &roomParticipant{Token: "bob", Name: "Bob", Online: true}
-	svc.room.Seats[1] = &roomSeat{Type: model.SeatTypeHuman, Token: "alice"}
-	svc.room.Seats[2] = &roomSeat{Type: model.SeatTypeHuman, Token: "bob"}
-	svc.room.Seats[3] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
-	svc.room.Seats[4] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
-	svc.scheduleReviewTimeoutLocked(&svc.room, g)
-	if svc.room.TimeoutKind != roomTimeoutReview {
-		t.Fatalf("expected review timeout to be scheduled, got %q", svc.room.TimeoutKind)
+	room.Status = model.RoomStatusInProgress
+	room.ActiveGameID = "game-1"
+	room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Online: true}
+	room.Participants["bob"] = &roomParticipant{Token: "bob", Name: "Bob", Online: true}
+	room.Seats[1] = &roomSeat{Type: model.SeatTypeHuman, Token: "alice"}
+	room.Seats[2] = &roomSeat{Type: model.SeatTypeHuman, Token: "bob"}
+	room.Seats[3] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
+	room.Seats[4] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
+	svc.scheduleReviewTimeoutLocked(room, g)
+	if room.TimeoutKind != roomTimeoutReview {
+		t.Fatalf("expected review timeout to be scheduled, got %q", room.TimeoutKind)
 	}
-	remaining := time.Until(svc.room.TimeoutDeadline)
+	remaining := time.Until(room.TimeoutDeadline)
 	if remaining <= 59*time.Second || remaining > 60*time.Second {
 		t.Fatalf("expected roughly 60s review timeout, got %s", remaining)
 	}
-	svc.stopTimeoutLocked(&svc.room)
+	svc.stopTimeoutLocked(room)
 	svc.roomMu.Unlock()
 
 	svc.applyReviewTimeout(defaultRoomID, g.EventSeq)
@@ -310,21 +324,22 @@ func TestReviewTimeoutConfirmsUnconfirmedHumans(t *testing.T) {
 
 func TestReviewTimeoutSkipsSingleHumanGame(t *testing.T) {
 	svc := NewService(store.NewMemoryStore(), rules.NewEngine())
+	room := defaultRoomForTest(svc)
 	g := &model.Game{
 		EventSeq: 7,
 		Round:    model.RoundState{ConfirmedPlayers: map[int]bool{}},
 	}
 
 	svc.roomMu.Lock()
-	svc.room.Status = model.RoomStatusInProgress
-	svc.room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Online: true}
-	svc.room.Seats[1] = &roomSeat{Type: model.SeatTypeHuman, Token: "alice"}
-	svc.room.Seats[2] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
-	svc.room.Seats[3] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
-	svc.room.Seats[4] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
-	svc.scheduleReviewTimeoutLocked(&svc.room, g)
-	if svc.room.TimeoutKind != "" {
-		t.Fatalf("expected single-human review to have no timeout, got %q", svc.room.TimeoutKind)
+	room.Status = model.RoomStatusInProgress
+	room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Online: true}
+	room.Seats[1] = &roomSeat{Type: model.SeatTypeHuman, Token: "alice"}
+	room.Seats[2] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
+	room.Seats[3] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
+	room.Seats[4] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
+	svc.scheduleReviewTimeoutLocked(room, g)
+	if room.TimeoutKind != "" {
+		t.Fatalf("expected single-human review to have no timeout, got %q", room.TimeoutKind)
 	}
 	svc.roomMu.Unlock()
 }
@@ -333,6 +348,7 @@ func TestSchedulingHumanTimeoutBroadcastsGameChange(t *testing.T) {
 	st := store.NewMemoryStore()
 	eng := rules.NewEngine()
 	svc := NewService(st, eng)
+	room := defaultRoomForTest(svc)
 	g := rules.NewGame("game-1", 1)
 	if err := eng.StartGame(g); err != nil {
 		t.Fatal(err)
@@ -340,15 +356,15 @@ func TestSchedulingHumanTimeoutBroadcastsGameChange(t *testing.T) {
 	st.Put(g)
 
 	svc.roomMu.Lock()
-	svc.room.Status = model.RoomStatusInProgress
-	svc.room.ActiveGameID = "game-1"
-	svc.room.RoundNumber = g.RoundNumber
-	svc.room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Online: true}
-	svc.room.Participants["bob"] = &roomParticipant{Token: "bob", Name: "Bob", Online: true}
-	svc.room.Seats[1] = &roomSeat{Type: model.SeatTypeHuman, Token: "alice"}
-	svc.room.Seats[2] = &roomSeat{Type: model.SeatTypeHuman, Token: "bob"}
-	svc.room.Seats[3] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
-	svc.room.Seats[4] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
+	room.Status = model.RoomStatusInProgress
+	room.ActiveGameID = "game-1"
+	room.RoundNumber = g.RoundNumber
+	room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Online: true}
+	room.Participants["bob"] = &roomParticipant{Token: "bob", Name: "Bob", Online: true}
+	room.Seats[1] = &roomSeat{Type: model.SeatTypeHuman, Token: "alice"}
+	room.Seats[2] = &roomSeat{Type: model.SeatTypeHuman, Token: "bob"}
+	room.Seats[3] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
+	room.Seats[4] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
 	svc.roomMu.Unlock()
 
 	gameID, changed, roomChanged, continueLoop := svc.processRoomAutomationStep(defaultRoomID)
@@ -357,9 +373,9 @@ func TestSchedulingHumanTimeoutBroadcastsGameChange(t *testing.T) {
 	}
 	svc.roomMu.Lock()
 	defer svc.roomMu.Unlock()
-	defer svc.stopTimeoutLocked(&svc.room)
-	if svc.room.TimeoutKind != roomTimeoutAction {
-		t.Fatalf("expected action timeout to be scheduled, got %q", svc.room.TimeoutKind)
+	defer svc.stopTimeoutLocked(room)
+	if room.TimeoutKind != roomTimeoutAction {
+		t.Fatalf("expected action timeout to be scheduled, got %q", room.TimeoutKind)
 	}
 }
 
@@ -367,6 +383,7 @@ func TestRoundReviewClearsTemporaryAITakeover(t *testing.T) {
 	st := store.NewMemoryStore()
 	eng := rules.NewEngine()
 	svc := NewService(st, eng)
+	room := defaultRoomForTest(svc)
 	g := rules.NewGame("game-1", 1)
 	if err := eng.StartGame(g); err != nil {
 		t.Fatal(err)
@@ -377,23 +394,23 @@ func TestRoundReviewClearsTemporaryAITakeover(t *testing.T) {
 	st.Put(g)
 
 	svc.roomMu.Lock()
-	svc.room.Status = model.RoomStatusInProgress
-	svc.room.ActiveGameID = "game-1"
-	svc.room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Online: true}
-	svc.room.Participants["bob"] = &roomParticipant{Token: "bob", Name: "Bob", Online: true}
-	svc.room.Seats[1] = &roomSeat{Type: model.SeatTypeHuman, Token: "alice"}
-	svc.room.Seats[2] = &roomSeat{Type: model.SeatTypeHuman, Token: "bob"}
-	svc.room.Seats[3] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
-	svc.room.Seats[4] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
-	svc.room.TempAI = map[int]bool{1: true}
+	room.Status = model.RoomStatusInProgress
+	room.ActiveGameID = "game-1"
+	room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Online: true}
+	room.Participants["bob"] = &roomParticipant{Token: "bob", Name: "Bob", Online: true}
+	room.Seats[1] = &roomSeat{Type: model.SeatTypeHuman, Token: "alice"}
+	room.Seats[2] = &roomSeat{Type: model.SeatTypeHuman, Token: "bob"}
+	room.Seats[3] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
+	room.Seats[4] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
+	room.TempAI = map[int]bool{1: true}
 	svc.roomMu.Unlock()
 
 	svc.processRoomAutomationStep(defaultRoomID)
 	svc.roomMu.Lock()
 	defer svc.roomMu.Unlock()
-	svc.stopTimeoutLocked(&svc.room)
-	if len(svc.room.TempAI) != 0 {
-		t.Fatalf("expected temporary AI takeover to stop at review, got %+v", svc.room.TempAI)
+	svc.stopTimeoutLocked(room)
+	if len(room.TempAI) != 0 {
+		t.Fatalf("expected temporary AI takeover to stop at review, got %+v", room.TempAI)
 	}
 }
 
@@ -401,6 +418,7 @@ func TestAIRoundFromReviewTakesOverNextRound(t *testing.T) {
 	st := store.NewMemoryStore()
 	eng := rules.NewEngine()
 	svc := NewService(st, eng)
+	room := defaultRoomForTest(svc)
 	g := rules.NewGame("game-1", 1)
 	if err := eng.StartGame(g); err != nil {
 		t.Fatal(err)
@@ -412,15 +430,15 @@ func TestAIRoundFromReviewTakesOverNextRound(t *testing.T) {
 	st.Put(g)
 
 	svc.roomMu.Lock()
-	svc.room.Status = model.RoomStatusInProgress
-	svc.room.ActiveGameID = "game-1"
-	svc.room.RoundNumber = g.RoundNumber
-	svc.room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Online: true}
-	svc.room.Participants["bob"] = &roomParticipant{Token: "bob", Name: "Bob", Online: true}
-	svc.room.Seats[1] = &roomSeat{Type: model.SeatTypeHuman, Token: "alice"}
-	svc.room.Seats[2] = &roomSeat{Type: model.SeatTypeHuman, Token: "bob"}
-	svc.room.Seats[3] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
-	svc.room.Seats[4] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
+	room.Status = model.RoomStatusInProgress
+	room.ActiveGameID = "game-1"
+	room.RoundNumber = g.RoundNumber
+	room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Online: true}
+	room.Participants["bob"] = &roomParticipant{Token: "bob", Name: "Bob", Online: true}
+	room.Seats[1] = &roomSeat{Type: model.SeatTypeHuman, Token: "alice"}
+	room.Seats[2] = &roomSeat{Type: model.SeatTypeHuman, Token: "bob"}
+	room.Seats[3] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
+	room.Seats[4] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
 	svc.roomMu.Unlock()
 
 	if _, err := svc.RoomAIRound("alice"); err != nil {
@@ -429,15 +447,15 @@ func TestAIRoundFromReviewTakesOverNextRound(t *testing.T) {
 
 	svc.roomMu.Lock()
 	defer svc.roomMu.Unlock()
-	svc.stopTimeoutLocked(&svc.room)
+	svc.stopTimeoutLocked(room)
 	if g.Phase == model.PhaseRoundReview {
 		t.Fatal("expected AI round confirm to advance to the next round")
 	}
-	if !svc.room.TempAI[1] {
-		t.Fatalf("expected player 1 to be taken over after review, got temp=%+v pending=%+v", svc.room.TempAI, svc.room.PendingAI)
+	if !room.TempAI[1] {
+		t.Fatalf("expected player 1 to be taken over after review, got temp=%+v pending=%+v", room.TempAI, room.PendingAI)
 	}
-	if len(svc.room.PendingAI) != 0 {
-		t.Fatalf("expected pending takeover to be activated, got %+v", svc.room.PendingAI)
+	if len(room.PendingAI) != 0 {
+		t.Fatalf("expected pending takeover to be activated, got %+v", room.PendingAI)
 	}
 }
 
@@ -445,6 +463,7 @@ func TestAIStepFromReviewOnlyConfirms(t *testing.T) {
 	st := store.NewMemoryStore()
 	eng := rules.NewEngine()
 	svc := NewService(st, eng)
+	room := defaultRoomForTest(svc)
 	g := rules.NewGame("game-1", 1)
 	if err := eng.StartGame(g); err != nil {
 		t.Fatal(err)
@@ -455,15 +474,15 @@ func TestAIStepFromReviewOnlyConfirms(t *testing.T) {
 	st.Put(g)
 
 	svc.roomMu.Lock()
-	svc.room.Status = model.RoomStatusInProgress
-	svc.room.ActiveGameID = "game-1"
-	svc.room.RoundNumber = g.RoundNumber
-	svc.room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Online: true}
-	svc.room.Participants["bob"] = &roomParticipant{Token: "bob", Name: "Bob", Online: true}
-	svc.room.Seats[1] = &roomSeat{Type: model.SeatTypeHuman, Token: "alice"}
-	svc.room.Seats[2] = &roomSeat{Type: model.SeatTypeHuman, Token: "bob"}
-	svc.room.Seats[3] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
-	svc.room.Seats[4] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
+	room.Status = model.RoomStatusInProgress
+	room.ActiveGameID = "game-1"
+	room.RoundNumber = g.RoundNumber
+	room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Online: true}
+	room.Participants["bob"] = &roomParticipant{Token: "bob", Name: "Bob", Online: true}
+	room.Seats[1] = &roomSeat{Type: model.SeatTypeHuman, Token: "alice"}
+	room.Seats[2] = &roomSeat{Type: model.SeatTypeHuman, Token: "bob"}
+	room.Seats[3] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
+	room.Seats[4] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
 	svc.roomMu.Unlock()
 
 	_, action, err := svc.RoomAIStep("alice")
@@ -472,27 +491,28 @@ func TestAIStepFromReviewOnlyConfirms(t *testing.T) {
 	}
 	svc.roomMu.Lock()
 	defer svc.roomMu.Unlock()
-	svc.stopTimeoutLocked(&svc.room)
+	svc.stopTimeoutLocked(room)
 	if action.Type != model.ActionConfirmRound || !g.Round.ConfirmedPlayers[1] {
 		t.Fatalf("expected AI step in review to confirm only, action=%+v confirmed=%+v", action, g.Round.ConfirmedPlayers)
 	}
-	if len(svc.room.TempAI) != 0 || len(svc.room.PendingAI) != 0 {
-		t.Fatalf("expected AI step in review not to schedule takeover, temp=%+v pending=%+v", svc.room.TempAI, svc.room.PendingAI)
+	if len(room.TempAI) != 0 || len(room.PendingAI) != 0 {
+		t.Fatalf("expected AI step in review not to schedule takeover, temp=%+v pending=%+v", room.TempAI, room.PendingAI)
 	}
 }
 
 func TestManualAIActionCountsAsHumanAction(t *testing.T) {
 	svc := NewService(store.NewMemoryStore(), rules.NewEngine())
+	room := defaultRoomForTest(svc)
 
 	svc.roomMu.Lock()
-	svc.room.HumanActionThisRound = false
+	room.HumanActionThisRound = false
 	svc.roomMu.Unlock()
 
 	svc.markHumanAction(defaultRoomID)
 
 	svc.roomMu.Lock()
 	defer svc.roomMu.Unlock()
-	if !svc.room.HumanActionThisRound {
+	if !room.HumanActionThisRound {
 		t.Fatal("expected manually requested AI action to count as human activity")
 	}
 }
@@ -501,6 +521,7 @@ func TestManualConfirmCountsAsHumanAction(t *testing.T) {
 	st := store.NewMemoryStore()
 	eng := rules.NewEngine()
 	svc := NewService(st, eng)
+	room := defaultRoomForTest(svc)
 	g := rules.NewGame("game-1", 1)
 	if err := eng.StartGame(g); err != nil {
 		t.Fatal(err)
@@ -511,14 +532,14 @@ func TestManualConfirmCountsAsHumanAction(t *testing.T) {
 	st.Put(g)
 
 	svc.roomMu.Lock()
-	svc.room.Status = model.RoomStatusInProgress
-	svc.room.ActiveGameID = "game-1"
-	svc.room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Online: true}
-	svc.room.Participants["bob"] = &roomParticipant{Token: "bob", Name: "Bob", Online: true}
-	svc.room.Seats[1] = &roomSeat{Type: model.SeatTypeHuman, Token: "alice"}
-	svc.room.Seats[2] = &roomSeat{Type: model.SeatTypeHuman, Token: "bob"}
-	svc.room.Seats[3] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
-	svc.room.Seats[4] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
+	room.Status = model.RoomStatusInProgress
+	room.ActiveGameID = "game-1"
+	room.Participants["alice"] = &roomParticipant{Token: "alice", Name: "Alice", Online: true}
+	room.Participants["bob"] = &roomParticipant{Token: "bob", Name: "Bob", Online: true}
+	room.Seats[1] = &roomSeat{Type: model.SeatTypeHuman, Token: "alice"}
+	room.Seats[2] = &roomSeat{Type: model.SeatTypeHuman, Token: "bob"}
+	room.Seats[3] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
+	room.Seats[4] = &roomSeat{Type: model.SeatTypeAI, Ready: true}
 	svc.roomMu.Unlock()
 
 	if _, err := svc.ApplyRoomAction("alice", model.Action{PlayerID: 1, Type: model.ActionConfirmRound}); err != nil {
@@ -526,8 +547,8 @@ func TestManualConfirmCountsAsHumanAction(t *testing.T) {
 	}
 	svc.roomMu.Lock()
 	defer svc.roomMu.Unlock()
-	svc.stopTimeoutLocked(&svc.room)
-	if !svc.room.HumanActionThisRound {
+	svc.stopTimeoutLocked(room)
+	if !room.HumanActionThisRound {
 		t.Fatal("expected manual confirm to count as human activity")
 	}
 }

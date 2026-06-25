@@ -268,6 +268,12 @@ body:not(.game-loading) .game-loading-screen {
   box-shadow: inset 0 -12px 20px rgba(93, 58, 27, 0.08);
 }
 
+.tutorial-room-card {
+  border-color: rgba(47, 125, 143, 0.34);
+  background: #e8f1f2;
+  box-shadow: inset 0 -12px 20px rgba(47, 125, 143, 0.08);
+}
+
 .room-card-title {
   display: flex;
   align-items: center;
@@ -317,6 +323,10 @@ body:not(.game-loading) .game-loading-screen {
 
 .room-status-pill.closing {
   background: #9b3e32;
+}
+
+.room-status-pill.tutorial {
+  background: #2f7d8f;
 }
 
 .lobby-seats {
@@ -1255,13 +1265,24 @@ input {
   margin-top: 0;
 }
 
+.action-slot {
+  display: grid;
+  min-height: 0;
+}
+
 .action-panel,
+.tutorial-chapter-panel,
 .events-panel {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   min-height: 0;
   overflow: hidden;
   background: rgba(246, 240, 226, 0.92);
+}
+
+.action-panel[hidden],
+.tutorial-chapter-panel[hidden] {
+  display: none;
 }
 
 .action-panel {
@@ -1271,8 +1292,16 @@ input {
   box-shadow: 0 8px 26px rgba(18, 15, 12, 0.18);
 }
 
+.tutorial-chapter-panel {
+  grid-template-rows: auto minmax(0, 1fr);
+  border: 0;
+  background: url("/assets/ui/action-panel-parchment-360x291.png") center / 100% 100% no-repeat;
+  box-shadow: 0 8px 26px rgba(18, 15, 12, 0.18);
+}
+
 .events-panel {
   position: relative;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   border: 0;
   background: url("/assets/ui/events-panel-parchment-360x437.png") center / 100% 100% no-repeat;
   box-shadow: 0 8px 26px rgba(18, 15, 12, 0.18);
@@ -1565,6 +1594,47 @@ input {
 .actions-list {
   align-content: start;
   overflow: auto;
+}
+
+.tutorial-chapter-list {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.tutorial-chapter-choice {
+  width: 100%;
+  min-height: 38px;
+  border-color: rgba(81, 45, 20, 0.46);
+  border-radius: 8px;
+  padding: 8px 12px;
+  color: #2b190d;
+  background: linear-gradient(180deg, #fff8e8, #e6c896);
+  box-shadow:
+    0 1px 0 rgba(255, 251, 228, 0.78) inset,
+    0 -2px 0 rgba(88, 47, 21, 0.18) inset,
+    0 2px 5px rgba(40, 24, 12, 0.14);
+  font-size: 13px;
+  font-weight: 900;
+  line-height: 1.3;
+  text-align: left;
+}
+
+.tutorial-chapter-choice:hover {
+  border-color: rgba(63, 35, 16, 0.78);
+  background: linear-gradient(180deg, #fffbf0, #edce94);
+}
+
+.tutorial-chapter-choice.active {
+  border-color: rgba(47, 125, 143, 0.82);
+  background: linear-gradient(180deg, #e8f6f7, #b8dce1);
+  color: #173f48;
+}
+
+.tutorial-chapter-choice.done {
+  color: #315b36;
 }
 
 .actions-list > .empty-note,
@@ -1962,6 +2032,103 @@ input {
 .help-close:hover {
   border-color: rgba(255, 235, 176, 0.78);
   background: rgba(104, 57, 24, 0.94);
+}
+
+.tutorial-panel {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-height: 220px;
+  display: grid;
+  gap: 8px;
+  overflow: auto;
+  border: 1px solid rgba(93, 55, 24, 0.34);
+  border-radius: 8px;
+  padding: 10px;
+  color: #3e2c1d;
+  background:
+    linear-gradient(rgba(255, 248, 229, 0.86), rgba(255, 248, 229, 0.86)),
+    url("/assets/ui/action-panel-parchment-360x291.png") center / 100% 100% no-repeat;
+  box-shadow:
+    0 3px 12px rgba(38, 23, 12, 0.12),
+    inset 0 1px 0 rgba(255, 252, 236, 0.6);
+}
+
+.tutorial-panel[hidden] {
+  display: none;
+}
+
+.tutorial-head {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.tutorial-head p {
+  margin: 0 0 4px;
+  color: #7b4e25;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.tutorial-head h2,
+.tutorial-body h3 {
+  margin: 0;
+  color: #342010;
+  line-height: 1.22;
+}
+
+.tutorial-head h2 {
+  font-size: 16px;
+}
+
+.tutorial-body {
+  display: grid;
+  gap: 7px;
+}
+
+.tutorial-body h3 {
+  font-size: 14px;
+}
+
+.tutorial-body p {
+  margin: 0;
+  color: #4f3b2a;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.tutorial-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.tutorial-panel button {
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+
+.debug-controls button.active {
+  border-color: rgba(47, 125, 143, 0.82);
+  background: linear-gradient(180deg, #e8f6f7, #b8dce1);
+}
+
+.tutorial-focus {
+  position: relative;
+  z-index: 70;
+  outline: 3px solid rgba(255, 226, 99, 0.96) !important;
+  outline-offset: 4px;
+  box-shadow:
+    0 0 0 6px rgba(255, 226, 99, 0.24),
+    0 0 24px rgba(255, 211, 64, 0.62) !important;
+}
+
+.tutorial-focus input,
+input.tutorial-focus {
+  background: #fff3bd !important;
 }
 
 .name-dialog-overlay {
@@ -2758,6 +2925,17 @@ input {
   z-index: 4;
   pointer-events: none;
   user-select: none;
+}
+
+.actions-list .action-btn.tutorial-focus {
+  border-color: rgba(93, 53, 18, 0.92) !important;
+  outline: 2px solid rgba(93, 53, 18, 0.48) !important;
+  outline-offset: 1px;
+  background: linear-gradient(180deg, rgba(255, 240, 173, 0.92), rgba(217, 168, 74, 0.78)) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 252, 221, 0.78),
+    inset 0 -2px 0 rgba(92, 54, 18, 0.22),
+    0 2px 5px rgba(40, 24, 12, 0.18) !important;
 }
 
 .ship-float {

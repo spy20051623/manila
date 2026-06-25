@@ -17,6 +17,8 @@ import (
 
 const (
 	defaultRoomID       = "room-1"
+	tutorialRoomID      = "tutorial"
+	tutorialRoomName    = "新手教学"
 	operationTimeout    = 60 * time.Second
 	offlineSeatTimeout  = 60 * time.Second
 	maxAutomationSteps  = 300
@@ -242,6 +244,7 @@ func (s *Service) LobbyView(token string) (model.LobbyView, error) {
 		Participant:   s.participantViewLocked(token, ""),
 		SuggestedName: s.defaultPlayerNameLocked(),
 	}
+	view.Rooms = append(view.Rooms, tutorialRoomSummary())
 	rooms := make([]*roomState, 0, len(s.rooms))
 	for _, room := range s.rooms {
 		if !room.Closed {
@@ -257,6 +260,18 @@ func (s *Service) LobbyView(token string) (model.LobbyView, error) {
 	s.roomMu.Unlock()
 	view.CompletedGames = s.completedGameSummaries()
 	return view, nil
+}
+
+func tutorialRoomSummary() model.RoomSummary {
+	return model.RoomSummary{
+		RoomID:           tutorialRoomID,
+		Name:             tutorialRoomName,
+		Status:           model.RoomStatusWaiting,
+		HumanPlayerCount: 1,
+		AIPlayerCount:    3,
+		SeatCount:        4,
+		IsTutorial:       true,
+	}
 }
 
 func (s *Service) RoomViewInRoom(roomID string, token string) (model.RoomView, error) {
@@ -1496,8 +1511,10 @@ func (s *Service) validTokenLocked(token string) bool {
 	if _, ok := s.participants[token]; ok {
 		return true
 	}
-	if _, ok := s.room.Participants[token]; ok {
-		return true
+	for _, room := range s.rooms {
+		if _, ok := room.Participants[token]; ok {
+			return true
+		}
 	}
 	return false
 }
@@ -1537,9 +1554,6 @@ func (s *Service) participantForSeatLocked(room *roomState, token string) *roomP
 
 func (s *Service) participantByTokenLocked(token string) *roomParticipant {
 	if participant := s.participants[token]; participant != nil {
-		return participant
-	}
-	if participant := s.room.Participants[token]; participant != nil {
 		return participant
 	}
 	for _, room := range s.rooms {

@@ -33,7 +33,7 @@ func loadListenAddr() string {
 	cfg := struct {
 		ListenAddr string `json:"listenAddr"`
 	}{
-		ListenAddr: "localhost:8080",
+		ListenAddr: "localhost:18080",
 	}
 	if data, err := os.ReadFile("config.json"); err == nil {
 		if err := json.Unmarshal(data, &cfg); err != nil {
@@ -44,7 +44,7 @@ func loadListenAddr() string {
 		return env
 	}
 	if cfg.ListenAddr == "" {
-		return "localhost:8080"
+		return "localhost:18080"
 	}
 	return cfg.ListenAddr
 }

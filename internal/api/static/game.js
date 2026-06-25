@@ -1,7 +1,11 @@
-let gameId = new URLSearchParams(window.location.search).get("game") || "";
-let roomId = new URLSearchParams(window.location.search).get("room") || "";
+const pageParams = new URLSearchParams(window.location.search);
+let gameId = pageParams.get("game") || "";
+let tutorialSessionId = pageParams.get("tutorial") || "";
+let tutorial = null;
+let tutorialChapterPickerOpen = false;
+let roomId = pageParams.get("room") || "";
 let room = null;
-let roomToken = new URLSearchParams(window.location.search).get("token") || localStorage.getItem("manilaRoomToken") || "";
+let roomToken = pageParams.get("token") || localStorage.getItem("manilaRoomToken") || "";
 if (roomToken) localStorage.setItem("manilaRoomToken", roomToken);
 let gameSocket = null;
 let reconnectTimer = null;
@@ -107,7 +111,7 @@ const HELP_CONTENT = {
       "放置阶段不允许主动放弃。轮到玩家放置时，必须选择一个合法位置放置 1 个同伙。",
       "破产状态会在玩家放置前自动判定：当玩家没有可抵押股份，且当前现金低于当前局面下任何一个可行放置操作的费用时，会进入破产状态。进入破产状态后，本轮航行内无法解除。",
       "破产状态下，玩家不能选择普通放置位置，只能作为偷渡客放置到货船。若仍有现金，必须支付所有剩余现金；若现金为 0，则免费放置。",
-      "破产玩家作为偷渡客时，只能选择当前可用费用最低的货船；如果多艘货船费用同为最低，只能选择 ID 最小的船。如果没有任何可用货船空位，会自动偷渡到 ID 最小的仍在本轮出航货船上。",
+      "破产玩家作为偷渡客时，只能选择当前可用费用最低的货船；如果多艘货船费用同为最低，只能选择排列更靠前的船。如果没有任何可用货船空位，会自动偷渡到本轮出航货船中排列最靠前的一艘。",
       "无空位偷渡不占用货船位置，也不影响该船后续普通登船格。无空位偷渡者不参与货船收益平分；该船正常船员先平分收益后，偷渡者获得等同于单个普通船员的收益。",
     ],
   },
@@ -248,6 +252,22 @@ async function api(path, options = {}) {
   return data;
 }
 
+function isTutorialMode() {
+  return Boolean(tutorialSessionId);
+}
+
+function gameStatePath() {
+  return isTutorialMode() ? `/tutorials/${encodeURIComponent(tutorialSessionId)}/state` : `/games/${encodeURIComponent(gameId)}/state`;
+}
+
+function legalActionsPath() {
+  return isTutorialMode() ? `/tutorials/${encodeURIComponent(tutorialSessionId)}/actions` : `/games/${encodeURIComponent(gameId)}/actions`;
+}
+
+function actionSubmitPath() {
+  return legalActionsPath();
+}
+
 function setupGameLoadingControls() {
   const retry = $("gameLoadingRetryBtn");
   const continueButton = $("gameLoadingContinueBtn");
@@ -303,6 +323,10 @@ async function bootGamePage() {
     markGameLoadingItem("加载基础资源");
     await resumeGameLoading(false);
   } catch (err) {
+    if (isMissingGameOrRoomError(err)) {
+      returnToLobby({ keepRoom: false });
+      return;
+    }
     showGameLoadingFailure(err);
   }
 }
@@ -369,6 +393,7 @@ async function loadBootGameStateWithRetry() {
   if (loadingStateLoaded) return;
   updateGameLoadingProgress("加载对局状态", "");
   await retryLoadingResource(loadBootGameStateOnce, LOADING_MAX_ATTEMPTS).catch((err) => {
+    if (isMissingGameOrRoomError(err)) throw err;
     throw createGameLoadingError("state", "对局状态加载失败", err?.message || "请重试加载。");
   });
   loadingStateLoaded = true;
@@ -376,16 +401,17 @@ async function loadBootGameStateWithRetry() {
 }
 
 async function loadBootGameStateOnce() {
-  if (!gameId) {
+  if (!gameId && !tutorialSessionId) {
     throw new Error("缺少对局信息");
   }
-  const data = await api(`/games/${encodeURIComponent(gameId)}/state`);
+  const data = await api(gameStatePath());
   clearActiveAnimations(false);
   wsPayloadQueue.length = 0;
   localPlayerId = Number(data.playerId || 0);
+  tutorial = data.tutorial || null;
   await applyRoomPayload(roomFromGamePayload(data), { animate: false });
   initialRoomLoaded = true;
-  if (state?.status === "ended") {
+  if (state?.status === "ended" && !tutorialHasPendingBreakpoints()) {
     lockFinishedGame();
     return;
   }
@@ -408,13 +434,17 @@ function finishGameLoading() {
   updateGameLoadingProgress("加载完成");
   document.body.classList.remove("game-loading");
   setGameLoadingBusy(false);
-  if (state?.status !== "ended") {
+  if (state?.status !== "ended" && !isTutorialMode()) {
     connectGameSocket();
-    syncGameStatePolling();
   }
+  syncGameStatePolling();
 }
 
 function showGameLoadingFailure(err) {
+  if (isMissingGameOrRoomError(err)) {
+    returnToLobby({ keepRoom: false });
+    return;
+  }
   const kind = err?.loadingKind || "state";
   const retry = $("gameLoadingRetryBtn");
   const continueButton = $("gameLoadingContinueBtn");
@@ -442,6 +472,10 @@ function getLocalPlayerId() {
 
 function syncTokenToURL() {
   const url = new URL(window.location.href);
+  if (tutorialSessionId) url.searchParams.set("tutorial", tutorialSessionId);
+  else url.searchParams.delete("tutorial");
+  if (gameId) url.searchParams.set("game", gameId);
+  else url.searchParams.delete("game");
   if (roomToken) url.searchParams.set("token", roomToken);
   else url.searchParams.delete("token");
   if (roomId) url.searchParams.set("room", roomId);
@@ -471,25 +505,35 @@ function returnToLobby(options = {}) {
   window.location.href = `${url.pathname}${url.search}`;
 }
 
+function isMissingGameOrRoomError(err) {
+  const message = err?.message || String(err || "");
+  return /缺少对局信息|not found|room not found|game not found/i.test(message);
+}
+
 async function refresh(options = {}) {
-  if (!gameId) {
+  if (!gameId && !tutorialSessionId) {
     returnToLobby({ keepRoom: false });
     return;
   }
   let data;
   try {
-    data = await api(`/games/${encodeURIComponent(gameId)}/state`);
-  } catch {
+    data = await api(gameStatePath());
+  } catch (err) {
+    if (isMissingGameOrRoomError(err)) {
+      returnToLobby({ keepRoom: false });
+      return;
+    }
     returnToLobby({ keepRoom: false });
     return;
   }
   clearActiveAnimations(false);
   wsPayloadQueue.length = 0;
   localPlayerId = Number(data.playerId || 0);
+  tutorial = data.tutorial || null;
   await applyRoomPayload(roomFromGamePayload(data), { animate: false });
   initialRoomLoaded = true;
   syncGameStatePolling();
-  if (state?.status === "ended") {
+  if (state?.status === "ended" && !tutorialHasPendingBreakpoints()) {
     lockFinishedGame();
     return;
   }
@@ -500,6 +544,7 @@ async function refresh(options = {}) {
 
 function roomFromGamePayload(data) {
   const game = data?.game || null;
+  if (data?.tutorial) tutorial = data.tutorial;
   roomId = data?.roomId || "";
   return {
     roomId,
@@ -510,7 +555,7 @@ function roomFromGamePayload(data) {
     gameId: game?.gameId || gameId,
     game,
     eventSeq: game?.eventSeq || data?.eventSeq || 0,
-    participant: { joined: Boolean(roomToken), playerId: Number(data?.playerId || 0) },
+    participant: { joined: Boolean(roomToken) || isTutorialMode(), playerId: Number(data?.playerId || 0) },
     canAIForCurrent: canLocalAIForGame(game),
   };
 }
@@ -524,6 +569,20 @@ function normalizeTimeout(timeout) {
 }
 
 function lockFinishedGame() {
+  if (tutorialHasPendingBreakpoints()) {
+    actions = tutorialBreakpointActive() ? tutorialContinueActions() : [];
+    actionInputLocked = false;
+    pendingSubmittedAction = null;
+    hideBoardActionTargets();
+    stopGameStatePolling();
+    if (gameSocket) {
+      gameSocket.onclose = null;
+      gameSocket.close();
+    }
+    setBusyButtons(false);
+    renderPostActionControls();
+    return;
+  }
   actions = [];
   actionInputLocked = true;
   pendingSubmittedAction = null;
@@ -660,7 +719,7 @@ async function applyRoomPayload(nextRoom, options = {}) {
   animationSnapshot = captureAnimationSnapshot();
   currentEventRecords = nextEvents;
   rebuildShipEventSnapshotTimeline(currentEventRecords, animationSnapshot);
-  if (state?.status === "ended") {
+  if (state?.status === "ended" && !tutorialHasPendingBreakpoints()) {
     lockFinishedGame();
     return;
   }
@@ -1804,7 +1863,7 @@ function syncAnimationToggleButton() {
 }
 
 function connectGameSocket() {
-  if (!gameId || state?.status === "ended") return;
+  if (isTutorialMode() || !gameId || state?.status === "ended") return;
   clearTimeout(reconnectTimer);
   if (gameSocket) {
     gameSocket.onclose = null;
@@ -1824,7 +1883,7 @@ function connectGameSocket() {
 }
 
 function shouldPollGameState() {
-  return Boolean(gameId && room?.status === "inProgress" && state && state.status !== "ended");
+  return Boolean((gameId || tutorialSessionId) && room?.status === "inProgress" && state && state.status !== "ended");
 }
 
 function gameStatePollDelay() {
@@ -1859,7 +1918,7 @@ async function runGameStatePoll() {
   try {
     await pollGameStateOnce();
   } catch (err) {
-    if (isMissingGameError(err)) {
+    if (isMissingGameOrRoomError(err)) {
       returnToLobby({ keepRoom: false });
       return;
     }
@@ -1870,14 +1929,11 @@ async function runGameStatePoll() {
 }
 
 async function pollGameStateOnce() {
-  const data = await api(`/games/${encodeURIComponent(gameId)}/state`);
+  const data = await api(gameStatePath());
   if (data.playerId !== undefined) localPlayerId = Number(data.playerId || 0);
+  tutorial = data.tutorial || tutorial;
   if (!initialRoomLoaded) return;
   enqueueWSPayload(roomFromGamePayload(data));
-}
-
-function isMissingGameError(err) {
-  return /not found|room not found|game not found/i.test(err?.message || String(err || ""));
 }
 
 function renderRoom() {
@@ -1892,6 +1948,7 @@ function renderRoom() {
     syncActionLockUI();
     renderEmpty();
   }
+  renderTutorialPanel();
 }
 
 function renderPostActionControls() {
@@ -1905,28 +1962,58 @@ function renderPostActionControls() {
   setBusyButtons(false);
   syncActionLockUI();
   syncAnimationToggleButton();
+  renderTutorialPanel();
+}
+
+async function recoverActionRenderState() {
+  await loadLegalActions();
+  syncTransientControls();
+  render();
 }
 
 async function loadLegalActions() {
-  actions = [];
-  actionEventSeq = state?.eventSeq ?? null;
+	actions = [];
+	actionEventSeq = state?.eventSeq ?? null;
+  if (tutorialBreakpointActive()) {
+    actions = tutorialContinueActions([]);
+    if (actionInputLocked) unlockLocalActions();
+    return actionEventSeq;
+  }
   if (!state || state.status === "ended") {
     return actionEventSeq;
   }
   if (!getLocalPlayerId()) {
     return actionEventSeq;
   }
-  const data = await api(`/games/${encodeURIComponent(gameId)}/actions`);
+  const data = await api(legalActionsPath());
   const loadedActions = data.actions || [];
   if (data.playerId !== undefined) localPlayerId = Number(data.playerId || 0);
   actionEventSeq = data.eventSeq ?? actionEventSeq;
+  if (tutorialBreakpointActive()) {
+    actions = tutorialContinueActions(loadedActions);
+    if (actionInputLocked) unlockLocalActions();
+    return actionEventSeq;
+  }
   if (actionInputLocked && !canUnlockLocalActions(loadedActions, actionEventSeq)) {
     actions = [];
     return actionEventSeq;
   }
   actions = loadedActions;
-  if (actionInputLocked) unlockLocalActions();
-  return actionEventSeq;
+	if (actionInputLocked) unlockLocalActions();
+	return actionEventSeq;
+}
+
+function tutorialBreakpointActive() {
+	return isTutorialMode() && tutorial?.allowedAction === "TutorialContinue";
+}
+
+function tutorialHasPendingBreakpoints() {
+  return isTutorialMode() && Boolean(tutorial) && !tutorial.completed;
+}
+
+function tutorialContinueActions(sourceActions = actions) {
+	const existing = (Array.isArray(sourceActions) ? sourceActions : []).find((action) => action.type === "TutorialContinue");
+	return [existing || { type: "TutorialContinue", description: "continue tutorial" }];
 }
 
 function canUnlockLocalActions(loadedActions, loadedEventSeq) {
@@ -2091,7 +2178,7 @@ async function submitAction(action, payloadOverride) {
   if (!state || !action) return;
   const localPlayerId = getLocalPlayerId();
   const expectedActorId = expectedActorIdForPhase();
-  if (state.phase !== "RoundReview" && expectedActorId !== localPlayerId) {
+  if (action.type !== "TutorialContinue" && state.phase !== "RoundReview" && expectedActorId !== localPlayerId) {
     showToast(`等待 P${expectedActorId || state.currentPlayer} 行动。`);
     return;
   }
@@ -2106,17 +2193,23 @@ async function submitAction(action, payloadOverride) {
   try {
     const requestBody = await prepareFreshActionRequest(action, payload, payloadOverride !== undefined);
     pendingSubmittedAction = requestBody;
-    await postActionWithSequenceRetry(action, requestBody, payloadOverride !== undefined);
+    const response = await postActionWithSequenceRetry(action, requestBody, payloadOverride !== undefined);
     resetTransientControls();
+    if (isTutorialMode() && response?.game) {
+      clearActiveAnimations(false);
+      await applyRoomPayload(roomFromGamePayload(response), { animate: false });
+      await loadLegalActions();
+      renderPostActionControls();
+    }
   } catch (err) {
     unlockLocalActions();
-    await loadLegalActions().then(renderPostActionControls).catch(() => {});
+    await recoverActionRenderState().catch(() => {});
     throw err;
   }
 }
 
 async function prepareFreshActionRequest(action, payload, hasPayloadOverride) {
-  const data = await api(`/games/${encodeURIComponent(gameId)}/actions`);
+  const data = await api(legalActionsPath());
   const freshActions = data.actions || [];
   if (data.playerId !== undefined) localPlayerId = Number(data.playerId || 0);
   actionEventSeq = data.eventSeq ?? state?.eventSeq ?? actionEventSeq;
@@ -2136,12 +2229,12 @@ async function prepareFreshActionRequest(action, payload, hasPayloadOverride) {
 
 async function postActionWithSequenceRetry(originalAction, requestBody, hasPayloadOverride) {
   try {
-    await api(`/games/${encodeURIComponent(gameId)}/actions`, { method: "POST", body: JSON.stringify(requestBody) });
+    return await api(actionSubmitPath(), { method: "POST", body: JSON.stringify(requestBody) });
   } catch (err) {
     if (!isEventSequenceMismatch(err)) throw err;
     const retryBody = await prepareFreshActionRequest(originalAction, requestBody.payload, hasPayloadOverride);
     pendingSubmittedAction = retryBody;
-    await api(`/games/${encodeURIComponent(gameId)}/actions`, { method: "POST", body: JSON.stringify(retryBody) });
+    return await api(actionSubmitPath(), { method: "POST", body: JSON.stringify(retryBody) });
   }
 }
 
@@ -2180,7 +2273,7 @@ async function aiStep() {
     await api(`/games/${encodeURIComponent(gameId)}/ai-step`, { method: "POST" });
   } catch (err) {
     unlockLocalActions();
-    await loadLegalActions().then(renderPostActionControls).catch(() => {});
+    await recoverActionRenderState().catch(() => {});
     throw err;
   } finally {
     aiBusy = false;
@@ -2203,7 +2296,7 @@ async function aiAdvanceRound() {
     await api(`/games/${encodeURIComponent(gameId)}/ai-round`, { method: "POST" });
   } catch (err) {
     unlockLocalActions();
-    await loadLegalActions().then(renderPostActionControls).catch(() => {});
+    await recoverActionRenderState().catch(() => {});
     throw err;
   } finally {
     aiBusy = false;
@@ -2237,6 +2330,7 @@ function render() {
   renderActionList();
   renderEvents();
   renderSettlementOverlay();
+  renderTutorialPanel();
 }
 
 function renderEmpty() {
@@ -2265,6 +2359,11 @@ function renderEmpty() {
 
 function renderSettlementOverlay() {
   const overlay = $("settlementOverlay");
+  if (tutorialHasPendingBreakpoints()) {
+    overlay.hidden = true;
+    overlay.innerHTML = "";
+    return;
+  }
   const settlement = settlementForDisplay();
   const scores = settlement?.scores || [];
   if (!scores.length || settlementOverlayClosed) {
@@ -2387,6 +2486,7 @@ async function handleGoodsClick(goodsId) {
   }
   renderGoodsMarket();
   renderContextControls();
+  refreshTutorialFocus();
 }
 
 function renderPorts() {
@@ -2686,41 +2786,52 @@ function renderPlayersCompact() {
 }
 
 function renderContextControls() {
-  const box = $("contextControls");
-  box.innerHTML = "";
-  if (!state || actions.length === 0) return;
+	const box = $("contextControls");
+	box.innerHTML = "";
+	if (!state || actions.length === 0) return;
+	if (tutorialBreakpointActive()) return;
 
   const bid = actions.find((a) => a.type === "Bid");
-  if (bid) {
-    const passBid = actions.find((a) => a.type === "PassBid");
-    const min = Number(bid.payload?.minBid || 1);
-    const max = Number(bid.payload?.maxBid || min);
+  const passBid = actions.find((a) => a.type === "PassBid");
+  if (state.phase === "Auction" && (bid || passBid)) {
+    const canBid = Boolean(bid);
+    const canPassBid = Boolean(passBid);
+    const bidKey = bid ? ` data-action-key="${escapeAttr(actionKeyFor(bid))}"` : "";
+    const passBidKey = passBid ? ` data-action-key="${escapeAttr(actionKeyFor(passBid))}"` : "";
+    const min = canBid ? Number(bid.payload?.minBid || 1) : Number(state.auction?.currentBid || 0) + 1;
+    const max = canBid ? Number(bid.payload?.maxBid || min) : min;
+    const bidValue = min;
+    const rangeNote = canBid ? `允许范围 ${min} 到 ${max}。` : `当前最低出价 ${min}，本步不能继续出价。`;
     box.appendChild(contextCard("竞拍港务长", `
       <div class="bid-input-row">
-        ${numberStepperHTML({ id: "bidAmountInput", min, max, value: min })}
+        ${numberStepperHTML({ id: "bidAmountInput", min, max, value: bidValue, disabled: !canBid })}
       </div>
-      <div class="empty-note bid-range-note">允许范围 ${min} 到 ${max}。</div>
+      <div class="empty-note bid-range-note">${rangeNote}</div>
       <div class="inline-controls bid-button-row">
-        <button id="bidSubmitBtn" type="button">出价</button>
-        ${passBid ? `<button id="bidPassBtn" type="button">放弃</button>` : ""}
+        <button id="bidSubmitBtn" type="button"${bidKey} ${canBid ? "" : "disabled"}>出价</button>
+        <button id="bidPassBtn" type="button"${passBidKey} ${canPassBid ? "" : "disabled"}>放弃</button>
       </div>
     `));
     bindNumberStepper(box, "#bidAmountInput", min, max);
-    $("bidSubmitBtn").onclick = () => submitBid(bid).catch(showError);
-    if (passBid) $("bidPassBtn").onclick = () => submitAction(passBid).catch(showError);
+    if (canBid) $("bidSubmitBtn").onclick = () => submitBid(bid).catch(showError);
+    if (canPassBid) $("bidPassBtn").onclick = () => submitAction(passBid).catch(showError);
   }
 
   if (state.phase === "HarborMasterSelectGoods") {
+    const selectGoodsAction = actions.find((a) => a.type === "SelectGoods");
+    const selectGoodsKey = selectGoodsAction ? ` data-action-key="${escapeAttr(actionKeyFor(selectGoodsAction))}"` : "";
     box.appendChild(contextCard("选择出航货物", `
       <div class="empty-note">在上方货物牌中点选 3 种。</div>
       <div class="context-actions">
-        <button id="selectGoodsSubmitBtn" type="button" ${selectedGoods.size === 3 ? "" : "disabled"}>确认出航</button>
+        <button id="selectGoodsSubmitBtn" type="button"${selectGoodsKey} ${selectedGoods.size === 3 ? "" : "disabled"}>确认出航</button>
       </div>
     `));
     $("selectGoodsSubmitBtn").onclick = () => submitSelectedGoods().catch(showError);
   }
 
   if (state.phase === "HarborMasterSetShips") {
+    const setStartsAction = actions.find((a) => a.type === "SetShipStarts");
+    const setStartsKey = setStartsAction ? ` data-action-key="${escapeAttr(actionKeyFor(setStartsAction))}"` : "";
     const ids = selectedShipIds();
     const controls = ids.map((id) => {
       const value = clampIntegerValue(shipStarts[id] ?? 3, 0, 5);
@@ -2741,7 +2852,7 @@ function renderContextControls() {
       <div class="input-grid">${controls}</div>
       <div class="inline-controls action-row">
         <span id="startsSumText" class="empty-note"></span>
-        <button id="startsSubmitBtn" type="button">确认起点</button>
+        <button id="startsSubmitBtn" type="button"${setStartsKey}>确认起点</button>
       </div>
     `));
     bindSliderNumberControls(box, ".ship-start-input", 0, 5, (input, value) => {
@@ -2752,8 +2863,9 @@ function renderContextControls() {
     updateStartsSum();
   }
 
-  if (state.phase === "NavigatorAction") {
-    const moveAction = actions.find((a) => a.type === "NavigatorMove");
+	const moveAction = actions.find((a) => a.type === "NavigatorMove");
+	if (state.phase === "NavigatorAction") {
+    const moveKey = moveAction ? ` data-action-key="${escapeAttr(actionKeyFor(moveAction))}"` : "";
     const step = state.round?.navigatorStep === "big" ? "大领航员" : "小领航员";
     const maxMove = state.round?.navigatorStep === "big" ? 2 : 1;
     const ids = selectedShipIds();
@@ -2780,16 +2892,16 @@ function renderContextControls() {
       <div class="input-grid">${controls}</div>
       <div class="inline-controls action-row">
         <span id="navMoveHint" class="empty-note">${state.round?.navigatorStep === "big" ? "总移动量不超过 2；全 0 表示不移动。" : "总移动量不超过 1；全 0 表示不移动。"}</span>
-        <button id="navSubmitBtn" type="button" ${moveAction ? "" : "disabled"}>移动</button>
+				<button id="navSubmitBtn" type="button"${moveKey} ${moveAction ? "" : "disabled"}>移动</button>
       </div>
     `));
     bindSliderNumberControls(box, ".nav-move-input", -maxMove, maxMove, (input, value) => {
       navigatorMoves[input.dataset.shipId] = value;
       updateNavigatorMoveState();
     });
-    $("navSubmitBtn").onclick = () => submitNavigatorMove(moveAction).catch(showError);
-    updateNavigatorMoveState();
-  }
+		if (moveAction) $("navSubmitBtn").onclick = () => submitNavigatorMove(moveAction).catch(showError);
+		updateNavigatorMoveState();
+	}
 }
 
 function numberStepperHTML({ id = "", inputClass = "", min, max, value, disabled = false, attrs = "" }) {
@@ -2898,20 +3010,33 @@ function contextCard(title, html) {
 }
 
 function renderActionList() {
-  const list = $("actionsList");
+	const list = $("actionsList");
   if (!state) {
     list.innerHTML = `<div class="empty-note">尚无游戏。</div>`;
     return;
   }
+	if (tutorialBreakpointActive()) {
+		actions = tutorialContinueActions();
+	}
   if (state.status === "ended") {
+    if (tutorialBreakpointActive()) {
+      list.innerHTML = actions.map((action) => {
+        return `<button class="action-btn" type="button" data-action-key="${escapeAttr(actionKeyFor(action))}">${actionIconHTML(action)}<span class="action-label-text">${actionLabel(action)}</span></button>`;
+      }).join("");
+      list.querySelectorAll(".action-btn").forEach((button) => {
+        const action = actionByKey(button.dataset.actionKey);
+        button.onclick = () => handleListedAction(action).catch(showError);
+      });
+      return;
+    }
     list.innerHTML = `<div class="empty-note">游戏结束。</div>`;
     return;
   }
-  if (actions.length === 0) {
-    list.innerHTML = `<div class="empty-note">等待其他玩家，或当前阶段没有可选动作。</div>`;
-    return;
-  }
-  if (state.phase === "Auction" && actions.some((action) => action.type === "Bid")) {
+	if (actions.length === 0) {
+		list.innerHTML = `<div class="empty-note">等待其他玩家，或当前阶段没有可选动作。</div>`;
+		return;
+	}
+	if (state.phase === "Auction" && actions.some((action) => action.type === "Bid" || action.type === "PassBid")) {
     list.innerHTML = "";
     return;
   }
@@ -3180,7 +3305,7 @@ function updateNavigatorMoveState() {
 
 function syncTransientControls() {
   if (!state) return;
-  if (state.phase === "HarborMasterSelectGoods" && selectedGoods.size === 0) {
+  if (state.phase === "HarborMasterSelectGoods" && selectedGoods.size === 0 && !isTutorialMode()) {
     selectedGoods = new Set(selectedShipIds().slice(0, 3));
   }
   if (state.phase !== "HarborMasterSelectGoods") {
@@ -3351,6 +3476,7 @@ function actionLabel(action) {
     case "NavigatorMove": return "领航员移动货船";
     case "PirateChooseDestination": return `把 ${goodsName(payload.shipId)} 船送往${payload.destination === "port" ? "港口" : "船坞"}`;
     case "ConfirmRound": return "确认本轮结算";
+    case "TutorialContinue": return "继续";
     default: return action.type;
   }
 }
@@ -3452,6 +3578,7 @@ function eventName(type) {
     RoundReviewStarted: "结算完成",
     RoundConfirmed: "玩家确认",
     GameEnded: "游戏结束",
+    TutorialNote: "教学提示",
     RuleError: "规则异常",
   }[type] || type;
 }
@@ -3488,6 +3615,7 @@ function formatEventData(event) {
     case "RoundReviewStarted": return `第 ${data.roundNumber} 轮结算完成，等待玩家确认`;
     case "RoundConfirmed": return `P${data.playerId} 已确认第 ${data.roundNumber} 轮`;
     case "GameEnded": return formatScores(data.scores);
+    case "TutorialNote": return `${event.message || "教学提示"}${data.body ? `：${data.body}` : ""}`;
     case "RuleError": return Object.keys(data).length ? `${event.message || "规则异常"}：${JSON.stringify(data)}` : (event.message || "规则异常");
     default: return Object.keys(data).length ? JSON.stringify(data) : (event.message || "");
   }
@@ -3618,10 +3746,182 @@ function shipStatusName(status) {
 
 function setBusyButtons(isBusy) {
   const ended = state?.status === "ended";
-  const disabled = ended || isBusy || actionInputLocked || !canLocalAIForGame(state);
+  const disabled = isTutorialMode() || ended || isBusy || actionInputLocked || !canLocalAIForGame(state);
   $("aiStepBtn").disabled = disabled;
   $("aiRoundBtn").disabled = disabled;
   $("returnLobbyBtn").disabled = false;
+  syncTutorialToolbar();
+}
+
+function renderTutorialPanel() {
+  const panel = $("tutorialPanel");
+  if (!panel) return;
+  clearTutorialFocus();
+  if (!isTutorialMode() || !tutorial) {
+    panel.hidden = true;
+    tutorialChapterPickerOpen = false;
+    if ($("aiStepBtn")) $("aiStepBtn").hidden = false;
+    if ($("aiRoundBtn")) $("aiRoundBtn").hidden = false;
+    syncTutorialToolbar();
+    return;
+  }
+  panel.hidden = false;
+  if ($("aiStepBtn")) $("aiStepBtn").hidden = true;
+  if ($("aiRoundBtn")) $("aiRoundBtn").hidden = true;
+  const chapters = Array.isArray(tutorial.chapters) ? tutorial.chapters : [];
+  if (tutorial.completed && tutorial.chapterId) {
+    localStorage.setItem(`manilaTutorialCompleted:${tutorial.chapterId}`, "1");
+  }
+  if (tutorial.chapterId) localStorage.setItem("manilaTutorialLastChapter", tutorial.chapterId);
+  const complete = Boolean(tutorial.completed);
+  const chapterIndex = Number(tutorial.chapterIndex || 0);
+  const chapterCount = Number(tutorial.chapterCount || chapters.length || 1);
+  const nextChapter = chapterIndex + 1 < chapters.length ? chapters[chapterIndex + 1] : null;
+  const finalChapterComplete = complete && chapterIndex + 1 >= chapterCount;
+  const actionHTML = complete
+    ? `<div class="tutorial-actions">${
+      finalChapterComplete
+        ? `<button id="tutorialLobbyBtn" type="button">返回大厅</button>`
+        : (nextChapter ? `<button id="tutorialNextBtn" type="button">下一章</button>` : "")
+    }</div>`
+    : "";
+  panel.innerHTML = `
+    <div class="tutorial-head">
+      <div>
+        <p>教学关 ${chapterIndex + 1}/${chapterCount}</p>
+        <h2>${escapeHTML(tutorial.chapterTitle || "教学关")}</h2>
+      </div>
+    </div>
+    <div class="tutorial-body">
+      <h3>${escapeHTML(complete ? (tutorial.completionTitle || "本章完成") : (tutorial.stepTitle || ""))}</h3>
+      <p>${escapeHTML(complete ? (tutorial.completionBody || "") : (tutorial.body || ""))}</p>
+    </div>
+    ${actionHTML}
+  `;
+  const next = $("tutorialNextBtn");
+  if (next && nextChapter) next.onclick = () => startTutorialChapter(nextChapter.id).catch(showError);
+  const lobby = $("tutorialLobbyBtn");
+  if (lobby) lobby.onclick = () => returnToLobby({ keepRoom: false });
+  syncTutorialToolbar();
+  if (!complete) applyTutorialFocus();
+}
+
+function syncTutorialToolbar() {
+  const inTutorial = isTutorialMode() && Boolean(tutorial);
+  const restart = $("tutorialRestartTopBtn");
+  const picker = $("tutorialChapterTopBtn");
+  if (restart) {
+    restart.hidden = !inTutorial;
+    restart.disabled = !inTutorial;
+  }
+  if (picker) {
+    picker.hidden = !inTutorial;
+    picker.disabled = !inTutorial;
+    picker.textContent = tutorialChapterPickerOpen ? "返回行动" : "选关";
+    picker.classList.toggle("active", tutorialChapterPickerOpen);
+  }
+  syncTutorialChapterPanel();
+}
+
+function toggleTutorialChapterPicker() {
+  if (!isTutorialMode() || !tutorial) return;
+  tutorialChapterPickerOpen = !tutorialChapterPickerOpen;
+  syncTutorialToolbar();
+}
+
+function syncTutorialChapterPanel() {
+  const actionPanel = $("actionPanel");
+  const chapterPanel = $("tutorialChapterPanel");
+  const shouldShowPicker = isTutorialMode() && Boolean(tutorial) && tutorialChapterPickerOpen;
+  if (actionPanel) actionPanel.hidden = shouldShowPicker;
+  if (chapterPanel) chapterPanel.hidden = !shouldShowPicker;
+  if (shouldShowPicker) renderTutorialChapterPanel();
+}
+
+function renderTutorialChapterPanel() {
+  const list = $("tutorialChapterList");
+  if (!list) return;
+  const chapters = Array.isArray(tutorial?.chapters) ? tutorial.chapters : [];
+  if (!chapters.length) {
+    list.innerHTML = `<div class="empty-note">暂无可选章节。</div>`;
+    return;
+  }
+  list.innerHTML = chapters.map((chapter, index) => {
+    const done = localStorage.getItem(`manilaTutorialCompleted:${chapter.id}`) === "1";
+    const active = chapter.id === tutorial?.chapterId;
+    const status = active ? "当前" : (done ? "已完成" : "");
+    const label = `${index + 1}. ${chapter.title || chapter.id}${status ? ` · ${status}` : ""}`;
+    return `<button class="tutorial-chapter-choice ${active ? "active" : ""} ${done ? "done" : ""}" type="button" data-tutorial-chapter="${escapeAttr(chapter.id)}">${escapeHTML(label)}</button>`;
+  }).join("");
+  list.querySelectorAll("[data-tutorial-chapter]").forEach((button) => {
+    button.onclick = () => startTutorialChapter(button.dataset.tutorialChapter).catch(showError);
+  });
+}
+
+function clearTutorialFocus() {
+  document.querySelectorAll(".tutorial-focus").forEach((el) => el.classList.remove("tutorial-focus"));
+}
+
+function refreshTutorialFocus() {
+  clearTutorialFocus();
+  if (isTutorialMode() && tutorial && !tutorial.completed) applyTutorialFocus();
+}
+
+function applyTutorialFocus() {
+  const selectors = Array.isArray(tutorial?.targets) && tutorial.targets.length
+    ? tutorial.targets
+    : (tutorial?.target ? [tutorial.target] : []);
+  let firstTarget = null;
+  for (const selector of selectors) {
+    let matches = [];
+    try {
+      matches = Array.from(document.querySelectorAll(selector));
+    } catch {
+      matches = [];
+    }
+    for (const target of matches) {
+      target.classList.add("tutorial-focus");
+      if (!firstTarget) firstTarget = target;
+    }
+  }
+  if (!firstTarget) return;
+  if (!isElementInViewport(firstTarget)) {
+    firstTarget.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
+}
+
+function isElementInViewport(el) {
+  const rect = el.getBoundingClientRect();
+  return rect.top >= 0 && rect.left >= 0 && rect.bottom <= window.innerHeight && rect.right <= window.innerWidth;
+}
+
+async function startTutorialChapter(chapterId) {
+  const data = await api("/tutorials", { method: "POST", body: JSON.stringify({ chapterId }) });
+  tutorialChapterPickerOpen = false;
+  tutorialSessionId = data.tutorial?.sessionId || tutorialSessionId;
+  tutorial = data.tutorial || tutorial;
+  gameId = data.game?.gameId || gameId;
+  localPlayerId = Number(data.playerId || 1);
+  actionInputLocked = false;
+  pendingSubmittedAction = null;
+  clearActiveAnimations(false);
+  wsPayloadQueue.length = 0;
+  await applyRoomPayload(roomFromGamePayload(data), { animate: false });
+  syncGameStatePolling();
+}
+
+async function restartTutorial() {
+  if (!tutorialSessionId) return;
+  const data = await api(`/tutorials/${encodeURIComponent(tutorialSessionId)}/restart`, { method: "POST" });
+  tutorialChapterPickerOpen = false;
+  tutorial = data.tutorial || tutorial;
+  gameId = data.game?.gameId || gameId;
+  actionInputLocked = false;
+  pendingSubmittedAction = null;
+  clearActiveAnimations(false);
+  wsPayloadQueue.length = 0;
+  await applyRoomPayload(roomFromGamePayload(data), { animate: false });
+  syncGameStatePolling();
 }
 
 function showError(err) {
@@ -3663,6 +3963,8 @@ function escapeAttr(value) {
 $("aiStepBtn").onclick = () => aiStep().catch(showError);
 $("aiRoundBtn").onclick = () => aiAdvanceRound().catch(showError);
 $("animationToggleBtn").onclick = toggleAnimations;
+$("tutorialRestartTopBtn").onclick = () => restartTutorial().catch(showError);
+$("tutorialChapterTopBtn").onclick = () => toggleTutorialChapterPicker();
 $("returnLobbyBtn").onclick = returnToLobby;
 $("eventsLatestBtn").onclick = scrollEventsToLatest;
 $("eventsList").addEventListener("scroll", handleEventsScroll);

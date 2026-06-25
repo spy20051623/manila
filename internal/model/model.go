@@ -40,6 +40,7 @@ const (
 	ActionNavigatorSkip           ActionType = "NavigatorSkip"
 	ActionPirateChooseDestination ActionType = "PirateChooseDestination"
 	ActionConfirmRound            ActionType = "ConfirmRound"
+	ActionTutorialContinue        ActionType = "TutorialContinue"
 )
 
 type GoodsID int
@@ -257,6 +258,30 @@ type CompletedGameSummary struct {
 	Scores      []Score `json:"scores"`
 }
 
+type TutorialSummary struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+}
+
+type TutorialView struct {
+	SessionID       string            `json:"sessionId"`
+	ChapterID       string            `json:"chapterId"`
+	ChapterTitle    string            `json:"chapterTitle"`
+	ChapterIndex    int               `json:"chapterIndex"`
+	ChapterCount    int               `json:"chapterCount"`
+	StepID          string            `json:"stepId"`
+	StepTitle       string            `json:"stepTitle"`
+	Body            string            `json:"body"`
+	Target          string            `json:"target,omitempty"`
+	Targets         []string          `json:"targets,omitempty"`
+	AllowedAction   string            `json:"allowedAction,omitempty"`
+	Completed       bool              `json:"completed"`
+	CompletionTitle string            `json:"completionTitle,omitempty"`
+	CompletionBody  string            `json:"completionBody,omitempty"`
+	Chapters        []TutorialSummary `json:"chapters"`
+}
+
 type RoomStatus string
 
 const (
@@ -331,6 +356,7 @@ type RoomSummary struct {
 	IsMember         bool       `json:"isMember,omitempty"`
 	IsOwner          bool       `json:"isOwner,omitempty"`
 	CanAdminClose    bool       `json:"canAdminClose,omitempty"`
+	IsTutorial       bool       `json:"isTutorial,omitempty"`
 }
 
 type LobbyView struct {

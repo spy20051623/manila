@@ -64,6 +64,8 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/room/", h.handleRoomPath)
 	mux.HandleFunc("/games", h.handleGames)
 	mux.HandleFunc("/games/", h.handleGamePath)
+	mux.HandleFunc("/tutorials", h.handleTutorials)
+	mux.HandleFunc("/tutorials/", h.handleTutorialPath)
 	mux.HandleFunc("/debug/games", h.handleDebugGames)
 	mux.HandleFunc("/debug/games/", h.handleDebugPath)
 	mux.HandleFunc("/training/random-games", h.handleTrainingRandomGames)
@@ -137,6 +139,94 @@ func (h *Handler) handleGames(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	g := h.service.CreateGame(req.Seed)
 	writeJSON(w, http.StatusCreated, map[string]interface{}{"game": g, "eventSeq": g.EventSeq})
+}
+
+func (h *Handler) handleTutorials(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case r.URL.Path == "/tutorials" && r.Method == http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]interface{}{"chapters": h.service.TutorialChapters()})
+	case r.URL.Path == "/tutorials" && r.Method == http.MethodPost:
+		var req struct {
+			ChapterID string `json:"chapterId"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		g, tutorial, err := h.service.CreateTutorial(req.ChapterID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "badRequest", err.Error())
+			return
+		}
+		h.writeTutorialPayload(w, http.StatusCreated, g, tutorial)
+	default:
+		writeError(w, http.StatusNotFound, "notFound", "not found")
+	}
+}
+
+func (h *Handler) handleTutorialPath(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) < 2 || parts[0] != "tutorials" {
+		writeError(w, http.StatusNotFound, "notFound", "not found")
+		return
+	}
+	sessionID := parts[1]
+	switch {
+	case len(parts) == 3 && parts[2] == "state" && r.Method == http.MethodGet:
+		g, tutorial, err := h.service.TutorialState(sessionID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "badRequest", err.Error())
+			return
+		}
+		h.writeTutorialPayload(w, http.StatusOK, g, tutorial)
+	case len(parts) == 3 && parts[2] == "actions" && r.Method == http.MethodGet:
+		actions, seq, err := h.service.TutorialActions(sessionID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "badRequest", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"actions": actions, "eventSeq": seq, "playerId": 1})
+	case len(parts) == 3 && parts[2] == "actions" && r.Method == http.MethodPost:
+		var action model.Action
+		if err := json.NewDecoder(r.Body).Decode(&action); err != nil {
+			writeError(w, http.StatusBadRequest, "badJson", err.Error())
+			return
+		}
+		g, tutorial, err := h.service.ApplyTutorialAction(sessionID, action)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "badRequest", err.Error())
+			return
+		}
+		h.writeTutorialPayload(w, http.StatusOK, g, tutorial)
+	case len(parts) == 3 && parts[2] == "restart" && r.Method == http.MethodPost:
+		g, tutorial, err := h.service.RestartTutorial(sessionID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "badRequest", err.Error())
+			return
+		}
+		h.writeTutorialPayload(w, http.StatusOK, g, tutorial)
+	default:
+		writeError(w, http.StatusNotFound, "notFound", "not found")
+	}
+}
+
+func (h *Handler) writeTutorialPayload(w http.ResponseWriter, status int, g *model.Game, tutorial model.TutorialView) {
+	visible := gameVisibleToViewer(g, 1)
+	writeJSON(w, status, map[string]interface{}{
+		"game":     visible,
+		"eventSeq": visible.EventSeq,
+		"playerId": 1,
+		"tutorial": tutorial,
+		"roomId":   "",
+		"roomName": "新手教学",
+		"seats":    tutorialSeats(),
+	})
+}
+
+func tutorialSeats() []model.RoomSeat {
+	return []model.RoomSeat{
+		{PlayerID: 1, Type: model.SeatTypeHuman, Name: "你", Ready: true, Online: true, IsYou: true},
+		{PlayerID: 2, Type: model.SeatTypeAI, Name: "教学脚本", Ready: true, Online: true},
+		{PlayerID: 3, Type: model.SeatTypeAI, Name: "教学脚本", Ready: true, Online: true},
+		{PlayerID: 4, Type: model.SeatTypeAI, Name: "教学脚本", Ready: true, Online: true},
+	}
 }
 
 func (h *Handler) handleLobbyPath(w http.ResponseWriter, r *http.Request) {
@@ -431,7 +521,8 @@ func (h *Handler) respondRoomByID(w http.ResponseWriter, r *http.Request, roomID
 func (h *Handler) roomViewForToken(token string) model.RoomView {
 	view, err := h.service.RoomView(token)
 	if err != nil {
-		return model.RoomView{Status: model.RoomStatusWaiting}
+		lobby, _ := h.service.LobbyView(token)
+		return model.RoomView{Status: model.RoomStatusWaiting, Participant: lobby.Participant}
 	}
 	view.Game = nil
 	view.EventSeq = 0

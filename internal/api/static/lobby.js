@@ -142,6 +142,9 @@ function renderRoomList() {
     return;
   }
   list.innerHTML = rooms.map(roomCardHTML).join("");
+  list.querySelectorAll("[data-room-tutorial]").forEach((button) => {
+    button.onclick = () => startTutorial().catch(showError);
+  });
   list.querySelectorAll("[data-room-enter]").forEach((button) => {
     button.onclick = () => enterRoom(button.dataset.roomEnter).catch(showError);
   });
@@ -151,6 +154,18 @@ function renderRoomList() {
 }
 
 function roomCardHTML(summary) {
+  if (summary.isTutorial) {
+    return `<article class="room-card tutorial-room-card">
+      <div>
+        <div class="room-card-title">${escapeHTML(summary.name || "新手教学")}</div>
+        <div class="room-card-meta">单人教学 · 规则和基本操作</div>
+      </div>
+      <div class="room-card-actions">
+        <span class="room-status-pill tutorial">教学</span>
+        <button data-room-tutorial="${escapeHTML(summary.roomId || "tutorial")}" type="button">进入</button>
+      </div>
+    </article>`;
+  }
   const status = roomSummaryStatus(summary);
   const adminClose = summary.canAdminClose
     ? `<button data-room-close="${escapeHTML(summary.roomId || "")}" type="button">强制关闭</button>`
@@ -331,9 +346,29 @@ async function createRoom() {
   await refresh();
 }
 
+async function startTutorial() {
+  const chapterId = localStorage.getItem("manilaTutorialLastChapter") || "auction";
+  const data = await api("/tutorials", { method: "POST", body: JSON.stringify({ chapterId }) });
+  const tutorial = data.tutorial || {};
+  if (tutorial.chapterId) localStorage.setItem("manilaTutorialLastChapter", tutorial.chapterId);
+  const url = new URL("/game.html", window.location.origin);
+  url.searchParams.set("tutorial", tutorial.sessionId || data.sessionId || "");
+  if (data.game?.gameId) url.searchParams.set("game", data.game.gameId);
+  window.location.href = `${url.pathname}${url.search}`;
+}
+
 async function enterRoom(roomID) {
   if (!(await ensurePlayerToken())) return;
-  await api(`/rooms/${encodeURIComponent(roomID)}/join`, { method: "POST" });
+  try {
+    await api(`/rooms/${encodeURIComponent(roomID)}/join`, { method: "POST" });
+  } catch (err) {
+    if (isMissingRoomError(err)) {
+      leaveRoomView();
+      await refresh();
+      return;
+    }
+    throw err;
+  }
   selectedRoomId = roomID;
   syncTokenToURL();
   connectRoomSocket();
@@ -419,7 +454,16 @@ function isAdmin() {
 }
 
 function showError(err) {
+  if (isMissingRoomError(err)) {
+    leaveRoomView();
+    refresh().catch(() => {});
+    return;
+  }
   showToast(err.message || String(err));
+}
+
+function isMissingRoomError(err) {
+  return /not found|room not found/i.test(err?.message || String(err || ""));
 }
 
 function showToast(message) {

@@ -16,7 +16,7 @@ class ManilaEnv:
     rules, legal actions, random seeds, and scoring.
     """
 
-    def __init__(self, base_url: str = "http://localhost:8080"):
+    def __init__(self, base_url: str = "http://localhost:18080"):
         self.base_url = base_url.rstrip("/")
         self.game_id: str | None = None
         self.state: dict | None = None

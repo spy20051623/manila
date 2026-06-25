@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>马尼拉对局</title>
-  <link rel="stylesheet" href="/board.css?v=board-15" />
+  <link rel="stylesheet" href="/board.css?v=board-27" />
 </head>
 <body class="game-loading">
   <section id="gameLoadingScreen" class="game-loading-screen" aria-label="游戏加载" aria-live="polite">
@@ -90,6 +90,8 @@
       <aside class="command-panel">
         <section class="panel debug-panel">
           <div class="debug-controls" aria-label="游戏控制">
+            <button id="tutorialChapterTopBtn" type="button" hidden>选关</button>
+            <button id="tutorialRestartTopBtn" type="button" hidden>重开</button>
             <button id="aiStepBtn" type="button">AI 一步</button>
             <button id="aiRoundBtn" type="button">AI 一轮</button>
             <button id="animationToggleBtn" type="button"></button>
@@ -97,14 +99,23 @@
           </div>
         </section>
 
-        <section class="panel action-panel">
-          <div class="panel-heading">
-            <h2>行动</h2>
-            <button class="help-button" type="button" data-help="actions" aria-label="查看行动帮助">?</button>
-          </div>
-          <div id="contextControls" class="context-controls"></div>
-          <div id="actionsList" class="actions-list"></div>
-        </section>
+        <div class="action-slot">
+          <section id="actionPanel" class="panel action-panel">
+            <div class="panel-heading">
+              <h2>行动</h2>
+              <button class="help-button" type="button" data-help="actions" aria-label="查看行动帮助">?</button>
+            </div>
+            <div id="contextControls" class="context-controls"></div>
+            <div id="actionsList" class="actions-list"></div>
+          </section>
+
+          <section id="tutorialChapterPanel" class="panel tutorial-chapter-panel" hidden>
+            <div class="panel-heading">
+              <h2>选关</h2>
+            </div>
+            <div id="tutorialChapterList" class="tutorial-chapter-list"></div>
+          </section>
+        </div>
 
         <section class="panel events-panel">
           <div class="panel-heading events-heading">
@@ -113,6 +124,7 @@
           </div>
           <button id="eventsLatestBtn" class="events-latest-button" type="button" hidden>返回最新</button>
           <div id="eventsList" class="events-list"></div>
+          <aside id="tutorialPanel" class="tutorial-panel" hidden></aside>
         </section>
       </aside>
     </main>
@@ -127,6 +139,6 @@
     </section>
   </div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/game.js?v=game-41" defer></script>
+  <script src="/game.js?v=game-65" defer></script>
 </body>
 </html>

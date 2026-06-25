@@ -27,11 +27,12 @@ type Service struct {
 	roomMu        sync.Mutex
 	participants  map[string]*roomParticipant
 	rooms         map[string]*roomState
+	tutorials     map[string]*tutorialSession
 	gameRooms     map[string]string
 	gameSnapshots map[string]gameRoomSnapshot
+	nextTutorial  int
 	nextRoom      int
 	adminToken    string
-	room          roomState
 	notify        func()
 	notifyGame    func(string)
 }
@@ -41,20 +42,19 @@ func NewService(st *store.MemoryStore, eng *rules.Engine) *Service {
 	if err != nil {
 		adminToken = fmt.Sprintf("admin-%d", time.Now().UnixNano())
 	}
-	defaultRoom := newRoomState("room-1", "房间 1", "")
 	s := &Service{
 		store:         st,
 		engine:        eng,
 		aiAssignments: map[string]map[int]ai.Genome{},
 		participants:  map[string]*roomParticipant{},
 		rooms:         map[string]*roomState{},
+		tutorials:     map[string]*tutorialSession{},
 		gameRooms:     map[string]string{},
 		gameSnapshots: map[string]gameRoomSnapshot{},
-		nextRoom:      2,
+		nextTutorial:  1,
+		nextRoom:      1,
 		adminToken:    adminToken,
-		room:          defaultRoom,
 	}
-	s.rooms[defaultRoom.ID] = &s.room
 	return s
 }
 

@@ -72,6 +72,174 @@ func TestHTTPCreateStartAndActions(t *testing.T) {
 	}
 }
 
+func TestHTTPTutorialLifecycle(t *testing.T) {
+	svc := app.NewService(store.NewMemoryStore(), rules.NewEngine())
+	h := NewHandler(svc)
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	res := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/tutorials", bytes.NewBufferString(`{"chapterId":"auction"}`))
+	mux.ServeHTTP(res, req)
+	if res.Code != http.StatusCreated {
+		t.Fatalf("create tutorial status %d body %s", res.Code, res.Body.String())
+	}
+	var created map[string]interface{}
+	if err := json.Unmarshal(res.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	tutorial := created["tutorial"].(map[string]interface{})
+	sessionID := tutorial["sessionId"].(string)
+	if tutorial["chapterId"] != "intro" {
+		t.Fatalf("expected old auction id to map to intro, got %s", res.Body.String())
+	}
+	if tutorial["stepId"] != "opening-bid" {
+		t.Fatalf("expected opening bid step, got %s", res.Body.String())
+	}
+	if _, ok := tutorial["recommended"]; ok {
+		t.Fatalf("tutorial response must not expose recommended values, got %s", res.Body.String())
+	}
+
+	res = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/tutorials/"+sessionID+"/actions", nil)
+	mux.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("actions status %d body %s", res.Code, res.Body.String())
+	}
+	var actions map[string]interface{}
+	if err := json.Unmarshal(res.Body.Bytes(), &actions); err != nil {
+		t.Fatal(err)
+	}
+	actionList := actions["actions"].([]interface{})
+	if !httpActionListHasType(actionList, string(model.ActionBid)) || !httpActionListHasType(actionList, string(model.ActionPassBid)) {
+		t.Fatalf("expected tutorial actions to expose legal bid and pass choices, got %s", res.Body.String())
+	}
+
+	res = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/tutorials/"+sessionID+"/actions", bytes.NewBufferString(`{"playerId":1,"type":"PassBid"}`))
+	mux.ServeHTTP(res, req)
+	if res.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid tutorial action to fail, status %d body %s", res.Code, res.Body.String())
+	}
+
+	res = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/tutorials/"+sessionID+"/actions", bytes.NewBufferString(`{"playerId":1,"type":"Bid","payload":{"amount":1}}`))
+	mux.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("submit tutorial status %d body %s", res.Code, res.Body.String())
+	}
+	var submitted map[string]interface{}
+	if err := json.Unmarshal(res.Body.Bytes(), &submitted); err != nil {
+		t.Fatal(err)
+	}
+	if submitted["tutorial"].(map[string]interface{})["stepId"] != "raise-to-eight" {
+		t.Fatalf("expected raise-to-eight step, got %s", res.Body.String())
+	}
+
+	res = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/tutorials/"+sessionID+"/actions", bytes.NewBufferString(`{"playerId":1,"type":"Bid","payload":{"amount":8}}`))
+	mux.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("second bid tutorial status %d body %s", res.Code, res.Body.String())
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &submitted); err != nil {
+		t.Fatal(err)
+	}
+	if submitted["tutorial"].(map[string]interface{})["stepId"] != "raise-to-eighteen" {
+		t.Fatalf("expected raise-to-eighteen step, got %s", res.Body.String())
+	}
+
+	res = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/tutorials/"+sessionID+"/actions", bytes.NewBufferString(`{"playerId":1,"type":"Bid","payload":{"amount":18}}`))
+	mux.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("third bid tutorial status %d body %s", res.Code, res.Body.String())
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &submitted); err != nil {
+		t.Fatal(err)
+	}
+	if submitted["tutorial"].(map[string]interface{})["stepId"] != "pass-high-bid" {
+		t.Fatalf("expected pass-high-bid step, got %s", res.Body.String())
+	}
+
+	res = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/tutorials/"+sessionID+"/actions", bytes.NewBufferString(`{"playerId":1,"type":"PassBid"}`))
+	mux.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("pass tutorial status %d body %s", res.Code, res.Body.String())
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &submitted); err != nil {
+		t.Fatal(err)
+	}
+	if submitted["tutorial"].(map[string]interface{})["stepId"] != "second-round-raise" {
+		t.Fatalf("expected second-round-raise step, got %s", res.Body.String())
+	}
+
+	res = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/tutorials/"+sessionID+"/actions", bytes.NewBufferString(`{"playerId":1,"type":"Bid","payload":{"amount":8}}`))
+	mux.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("second-round raise tutorial status %d body %s", res.Code, res.Body.String())
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &submitted); err != nil {
+		t.Fatal(err)
+	}
+	if submitted["tutorial"].(map[string]interface{})["stepId"] != "second-round-win" {
+		t.Fatalf("expected second-round-win step, got %s", res.Body.String())
+	}
+
+	res = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/tutorials/"+sessionID+"/actions", bytes.NewBufferString(`{"playerId":1,"type":"Bid","payload":{"amount":14}}`))
+	mux.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("winning bid tutorial status %d body %s", res.Code, res.Body.String())
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &submitted); err != nil {
+		t.Fatal(err)
+	}
+	if submitted["tutorial"].(map[string]interface{})["stepId"] != "buy-share" {
+		t.Fatalf("expected buy-share step, got %s", res.Body.String())
+	}
+
+	for _, body := range []string{
+		`{"playerId":1,"type":"BuyShare","payload":{"goodsId":1}}`,
+		`{"playerId":1,"type":"SelectGoods","payload":{"goodsIds":[1,2,3]}}`,
+		`{"playerId":1,"type":"SetShipStarts","payload":{"starts":{"1":5,"2":4,"3":0}}}`,
+	} {
+		res = httptest.NewRecorder()
+		req = httptest.NewRequest(http.MethodPost, "/tutorials/"+sessionID+"/actions", bytes.NewBufferString(body))
+		mux.ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("tutorial action %s status %d body %s", body, res.Code, res.Body.String())
+		}
+		if err := json.Unmarshal(res.Body.Bytes(), &submitted); err != nil {
+			t.Fatal(err)
+		}
+		if tutorial, ok := submitted["tutorial"].(map[string]interface{}); ok {
+			if _, ok := tutorial["recommended"]; ok {
+				t.Fatalf("tutorial response must not expose recommended values, got %s", res.Body.String())
+			}
+		}
+	}
+	if !submitted["tutorial"].(map[string]interface{})["completed"].(bool) {
+		t.Fatalf("expected tutorial completion after starts, got %s", res.Body.String())
+	}
+
+	res = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/tutorials/"+sessionID+"/restart", nil)
+	mux.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("restart tutorial status %d body %s", res.Code, res.Body.String())
+	}
+	var restarted map[string]interface{}
+	if err := json.Unmarshal(res.Body.Bytes(), &restarted); err != nil {
+		t.Fatal(err)
+	}
+	if restarted["tutorial"].(map[string]interface{})["chapterId"] != "intro" || restarted["tutorial"].(map[string]interface{})["stepId"] != "opening-bid" {
+		t.Fatalf("expected restarted opening bid step, got %s", res.Body.String())
+	}
+}
+
 func assertCacheHeader(t *testing.T, mux *http.ServeMux, path string, expected string) {
 	t.Helper()
 	res := httptest.NewRecorder()
@@ -86,6 +254,16 @@ func assertCacheHeader(t *testing.T, mux *http.ServeMux, path string, expected s
 	if strings.Contains(expected, "immutable") && !strings.Contains(res.Header().Get("Cache-Control"), "max-age=31536000") {
 		t.Fatalf("GET %s should be long cached, got %q", path, res.Header().Get("Cache-Control"))
 	}
+}
+
+func httpActionListHasType(actions []interface{}, actionType string) bool {
+	for _, raw := range actions {
+		action, ok := raw.(map[string]interface{})
+		if ok && action["type"] == actionType {
+			return true
+		}
+	}
+	return false
 }
 
 func TestHTTPTrainingRandomGames(t *testing.T) {
@@ -156,12 +334,14 @@ func TestRoomJoinSeatsStartAndObserverVisibility(t *testing.T) {
 	mux := http.NewServeMux()
 	h.Register(mux)
 
-	token := roomJoinNamed(t, mux, "Alice")
-	roomRequest(t, mux, http.MethodPost, "/room/seats/1/claim", token, nil)
-	roomRequest(t, mux, http.MethodPost, "/room/seats/2/ai", token, nil)
-	roomRequest(t, mux, http.MethodPost, "/room/seats/3/ai", token, nil)
-	roomRequest(t, mux, http.MethodPost, "/room/seats/4/ai", token, nil)
-	started := roomRequest(t, mux, http.MethodPost, "/room/ready", token, nil)
+	token := lobbyJoinNamed(t, mux, "Alice")
+	roomID := roomRequest(t, mux, http.MethodPost, "/rooms", token, nil)["roomId"].(string)
+	base := "/rooms/" + roomID
+	roomRequest(t, mux, http.MethodPost, base+"/seats/1/claim", token, nil)
+	roomRequest(t, mux, http.MethodPost, base+"/seats/2/ai", token, nil)
+	roomRequest(t, mux, http.MethodPost, base+"/seats/3/ai", token, nil)
+	roomRequest(t, mux, http.MethodPost, base+"/seats/4/ai", token, nil)
+	started := roomRequest(t, mux, http.MethodPost, base+"/ready", token, nil)
 	room := started["room"].(map[string]interface{})
 	if room["status"] != "inProgress" {
 		t.Fatalf("expected inProgress room, got %s", started)
@@ -237,14 +417,17 @@ func TestMultiplayerGameStateIncludesTimeoutCountdown(t *testing.T) {
 	mux := http.NewServeMux()
 	h.Register(mux)
 
-	alice := roomJoinNamed(t, mux, "Alice")
-	bob := roomJoinNamed(t, mux, "Bob")
-	roomRequest(t, mux, http.MethodPost, "/room/seats/1/claim", alice, nil)
-	roomRequest(t, mux, http.MethodPost, "/room/seats/2/claim", bob, nil)
-	roomRequest(t, mux, http.MethodPost, "/room/seats/3/ai", alice, nil)
-	roomRequest(t, mux, http.MethodPost, "/room/seats/4/ai", alice, nil)
-	roomRequest(t, mux, http.MethodPost, "/room/ready", alice, nil)
-	started := roomRequest(t, mux, http.MethodPost, "/room/ready", bob, nil)
+	alice := lobbyJoinNamed(t, mux, "Alice")
+	bob := lobbyJoinNamed(t, mux, "Bob")
+	roomID := roomRequest(t, mux, http.MethodPost, "/rooms", alice, nil)["roomId"].(string)
+	base := "/rooms/" + roomID
+	roomRequest(t, mux, http.MethodPost, base+"/join", bob, nil)
+	roomRequest(t, mux, http.MethodPost, base+"/seats/1/claim", alice, nil)
+	roomRequest(t, mux, http.MethodPost, base+"/seats/2/claim", bob, nil)
+	roomRequest(t, mux, http.MethodPost, base+"/seats/3/ai", alice, nil)
+	roomRequest(t, mux, http.MethodPost, base+"/seats/4/ai", alice, nil)
+	roomRequest(t, mux, http.MethodPost, base+"/ready", alice, nil)
+	started := roomRequest(t, mux, http.MethodPost, base+"/ready", bob, nil)
 	gameID := started["room"].(map[string]interface{})["gameId"].(string)
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -283,12 +466,14 @@ func TestGameActionEndpointTriggersRoomAutomation(t *testing.T) {
 	mux := http.NewServeMux()
 	h.Register(mux)
 
-	token := roomJoinNamed(t, mux, "Alice")
-	roomRequest(t, mux, http.MethodPost, "/room/seats/1/claim", token, nil)
-	roomRequest(t, mux, http.MethodPost, "/room/seats/2/ai", token, nil)
-	roomRequest(t, mux, http.MethodPost, "/room/seats/3/ai", token, nil)
-	roomRequest(t, mux, http.MethodPost, "/room/seats/4/ai", token, nil)
-	started := roomRequest(t, mux, http.MethodPost, "/room/ready", token, nil)
+	token := lobbyJoinNamed(t, mux, "Alice")
+	roomID := roomRequest(t, mux, http.MethodPost, "/rooms", token, nil)["roomId"].(string)
+	base := "/rooms/" + roomID
+	roomRequest(t, mux, http.MethodPost, base+"/seats/1/claim", token, nil)
+	roomRequest(t, mux, http.MethodPost, base+"/seats/2/ai", token, nil)
+	roomRequest(t, mux, http.MethodPost, base+"/seats/3/ai", token, nil)
+	roomRequest(t, mux, http.MethodPost, base+"/seats/4/ai", token, nil)
+	started := roomRequest(t, mux, http.MethodPost, base+"/ready", token, nil)
 	gameID := started["room"].(map[string]interface{})["gameId"].(string)
 
 	allowed := roomRequest(t, mux, http.MethodGet, "/games/"+gameID+"/actions", token, nil)
@@ -320,6 +505,14 @@ func TestLobbyCreateRoomRequiresGlobalToken(t *testing.T) {
 	participant := lobby["participant"].(map[string]interface{})
 	if participant["joined"] == true {
 		t.Fatalf("unauthenticated lobby view should not be joined: %s", state)
+	}
+	rooms := lobby["rooms"].([]interface{})
+	if len(rooms) != 1 {
+		t.Fatalf("startup lobby should only show tutorial entry, got %s", state)
+	}
+	tutorialRoom := rooms[0].(map[string]interface{})
+	if tutorialRoom["roomId"] != "tutorial" || tutorialRoom["name"] != "新手教学" || tutorialRoom["isTutorial"] != true {
+		t.Fatalf("expected tutorial room entry, got %s", state)
 	}
 
 	res := httptest.NewRecorder()

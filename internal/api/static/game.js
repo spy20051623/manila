@@ -3794,7 +3794,7 @@ function renderTutorialPanel() {
     </div>
     <div class="tutorial-body">
       <h3>${escapeHTML(complete ? (tutorial.completionTitle || "本章完成") : (tutorial.stepTitle || ""))}</h3>
-      <p>${escapeHTML(complete ? (tutorial.completionBody || "") : (tutorial.body || ""))}</p>
+      <p>${renderTutorialText(complete ? (tutorial.completionBody || "") : (tutorial.body || ""))}</p>
     </div>
     ${actionHTML}
   `;
@@ -3804,6 +3804,21 @@ function renderTutorialPanel() {
   if (lobby) lobby.onclick = () => returnToLobby({ keepRoom: false });
   syncTutorialToolbar();
   if (!complete) applyTutorialFocus();
+}
+
+function renderTutorialText(text) {
+  const source = String(text || "");
+  let html = "";
+  let cursor = 0;
+  const marker = /\*\*(.+?)\*\*/g;
+  for (const match of source.matchAll(marker)) {
+    const start = Number(match.index || 0);
+    html += escapeHTML(source.slice(cursor, start));
+    html += `<strong>${escapeHTML(match[1] || "")}</strong>`;
+    cursor = start + match[0].length;
+  }
+  html += escapeHTML(source.slice(cursor));
+  return html;
 }
 
 function syncTutorialToolbar() {

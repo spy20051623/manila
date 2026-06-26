@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"manila/internal/model"
 	"manila/internal/rules"
@@ -277,7 +278,11 @@ func (s *Service) tutorialSteps(session *tutorialSession, g *model.Game) ([]tuto
 	if chapter == nil {
 		return nil, fmt.Errorf("tutorial chapter not found")
 	}
-	return chapter.Build(s, g)
+	steps, err := chapter.Build(s, g)
+	if err != nil {
+		return nil, err
+	}
+	return emphasizeTutorialStepBodies(steps), nil
 }
 
 func (s *Service) buildTutorialGame(chapter *tutorialChapter, gameID string) (*model.Game, []tutorialStep, error) {
@@ -290,6 +295,7 @@ func (s *Service) buildTutorialGame(chapter *tutorialChapter, gameID string) (*m
 	if err != nil {
 		return nil, nil, err
 	}
+	steps = emphasizeTutorialStepBodies(steps)
 	s.addTutorialNote(g, chapter.Title, chapter.Description)
 	return g, steps, nil
 }
@@ -304,6 +310,96 @@ func (s *Service) addTutorialNote(g *model.Game, title string, body string) {
 			"body": body,
 		},
 	})
+}
+
+func emphasizeTutorialStepBodies(steps []tutorialStep) []tutorialStep {
+	for i := range steps {
+		if steps[i].ActionType == model.ActionTutorialContinue {
+			continue
+		}
+		for _, phrase := range tutorialEmphasisPhrases[steps[i].ID] {
+			steps[i].Body = emphasizeTutorialPhrase(steps[i].Body, phrase)
+		}
+	}
+	return steps
+}
+
+func emphasizeTutorialPhrase(body string, phrase string) string {
+	if phrase == "" || strings.Contains(body, "**"+phrase+"**") {
+		return body
+	}
+	return strings.Replace(body, phrase, "**"+phrase+"**", 1)
+}
+
+var tutorialEmphasisPhrases = map[string][]string{
+	"opening-bid":                    {"把竞拍数字设为 1 并点击“出价”"},
+	"raise-to-eight":                 {"把数字改成 8，然后点击“出价”"},
+	"raise-to-eighteen":              {"把数字设为 18 并出价"},
+	"pass-high-bid":                  {"请点击“放弃”"},
+	"second-round-raise":             {"请把数字设为 8 并出价"},
+	"second-round-win":               {"请出价 14"},
+	"buy-share":                      {"请购买人参股份"},
+	"select-goods":                   {"请点选人参、肉豆蔻和丝绸，再点击“确认出航”"},
+	"set-starts":                     {"请把人参设为 5、肉豆蔻设为 4、丝绸设为 0，然后确认起点"},
+	"place-ship":                     {"请把同伙放到人参船"},
+	"place-port":                     {"把同伙放到港口 B"},
+	"place-dock":                     {"请把同伙放到船坞 A"},
+	"place-pirate":                   {"请放到海盗船第 1 格"},
+	"place-insurance":                {"请把同伙放到保险商位置"},
+	"place-small-navigator":          {"请把同伙放到小领航员位置"},
+	"voyage-pirate":                  {"请把同伙放到海盗船第 1 格"},
+	"voyage-ship":                    {"请把同伙放到肉豆蔻船"},
+	"pirate-board":                   {"请让海盗船长登上丝绸船"},
+	"place-small-navigator-voyage":   {"请把同伙放到小领航员"},
+	"small-navigator-move":           {"把肉豆蔻船前进 1 格，人参船留在原位", "点击“移动”"},
+	"second-round-pirate":            {"请把同伙放到海盗船第 1 格"},
+	"place-big-navigator":            {"请把同伙放到大领航员位置"},
+	"pirate-skip-board":              {"请点击“海盗留在船上”"},
+	"second-round-ship":              {"请把同伙放到肉豆蔻船"},
+	"big-navigator-move":             {"把人参船设为 +1、肉豆蔻船设为 -1", "点击“移动”"},
+	"pirate-loot-captain":            {"把丝绸船送往港口"},
+	"settlement-auction-bid":         {"先出价 12"},
+	"settlement-auction-win":         {"请出价 20"},
+	"settlement-skip-share":          {"请点击“跳过购买股份”"},
+	"settlement-select-goods":        {"请选择人参、肉豆蔻和丝绸出航，再点击“确认出航”"},
+	"settlement-set-starts":          {"请把人参设为 5、肉豆蔻设为 2、丝绸设为 2"},
+	"settlement-place-ship":          {"把同伙放到人参船"},
+	"settlement-place-pirate":        {"把同伙放到海盗船长位置"},
+	"settlement-place-insurance":     {"把同伙放到保险商"},
+	"loot-to-port":                   {"先把肉豆蔻船送往港口"},
+	"loot-to-dock":                   {"现在把丝绸船送往船坞"},
+	"confirm-settlement":             {"请点击“确认本轮结算”"},
+	"settlement-all-in-open":         {"请先出价 24"},
+	"settlement-all-in-auction":      {"请出价 44"},
+	"settlement-all-in-skip-share":   {"请点击“跳过购买股份”"},
+	"settlement-all-in-select-goods": {"请选择人参、肉豆蔻和丝绸出航，再点击“确认出航”"},
+	"settlement-all-in-set-starts":   {"请把人参设为 5、肉豆蔻设为 2、丝绸设为 2，然后确认起点"},
+	"auto-mortgage-pirate":           {"请把同伙放到海盗船长位置"},
+	"insurance-loss-ship":            {"把同伙放到丝绸船"},
+	"insurance-loss-insurance":       {"再放到保险商"},
+	"confirm-loss-settlement":        {"请点击“确认本轮结算”"},
+	"bankruptcy-auction-pass":        {"请点击“放弃”"},
+	"stowaway":                       {"请点肉豆蔻船"},
+	"stowaway-tied-lowest":           {"仍然点肉豆蔻船"},
+	"stowaway-silk":                  {"请点丝绸船"},
+	"confirm-stowaway-settlement":    {"请点击“确认本轮结算”"},
+	"round4-auction-bid":             {"请出价 14"},
+	"round4-buy-share":               {"请购买 1 张人参股份"},
+	"round4-select-goods":            {"请选择人参、肉豆蔻和丝绸出航，再点击“确认出航”"},
+	"round4-set-starts":              {"请把人参设为 4、肉豆蔻设为 0、丝绸设为 5，然后确认起点"},
+	"round4-place-silk":              {"先把同伙放到丝绸船"},
+	"round4-place-pirate":            {"现在把同伙放到海盗船长位置"},
+	"round4-place-port":              {"现在放到港口 A"},
+	"round4-loot-ginseng":            {"把人参船送往港口"},
+	"confirm-round4-profit":          {"请点击“确认本轮结算”"},
+	"round5-auction-bid":             {"请先出价 8"},
+	"round5-auction-win":             {"请出价 16"},
+	"round5-buy-share":               {"请购买 1 张人参股份"},
+	"round5-select-goods":            {"请选择人参、丝绸和玉石出航，再点击“确认出航”"},
+	"round5-set-starts":              {"请把人参设为 5、丝绸设为 4、玉石设为 0，然后确认起点"},
+	"round5-place-ginseng":           {"先把同伙放到人参船"},
+	"round5-place-silk":              {"把同伙放到丝绸船"},
+	"round5-place-port":              {"把同伙放到港口 B"},
 }
 
 func tutorialActionButtonTarget(actionType model.ActionType, payload string) string {
@@ -367,7 +463,7 @@ func introTutorialChapter() tutorialChapter {
 			return []tutorialStep{
 				{
 					ID:         "opening-bid",
-					Title:      "先出一个低价",
+					Title:      "参与竞拍",
 					Body:       "每轮先竞拍港务长。港务长之后会买股、选货物、设置货船起点。现在把竞拍数字设为 1 并点击“出价”；只有最后赢得竞拍的人才会实际付款。",
 					Target:     "#bidAmountInput",
 					Targets:    []string{"#bidAmountInput", "#bidSubmitBtn"},
@@ -387,7 +483,7 @@ func introTutorialChapter() tutorialChapter {
 				},
 				{
 					ID:         "raise-to-eight",
-					Title:      "继续加到 8",
+					Title:      "继续出价",
 					Body:       "当前最高价是 P2 的 5。继续竞争港务长必须出 6 或更高；这一步把数字改成 8，然后点击“出价”。",
 					Target:     "#bidAmountInput",
 					Targets:    []string{"#bidAmountInput", "#bidSubmitBtn"},
@@ -405,7 +501,7 @@ func introTutorialChapter() tutorialChapter {
 				},
 				{
 					ID:         "raise-to-eighteen",
-					Title:      "再加一次价",
+					Title:      "再次出价",
 					Body:       "当前最高价是 P2 的 15。继续竞拍必须出更高的价格；这一步把数字设为 18 并出价。",
 					Target:     "#bidAmountInput",
 					Targets:    []string{"#bidAmountInput", "#bidSubmitBtn"},
@@ -445,7 +541,7 @@ func introTutorialChapter() tutorialChapter {
 				},
 				{
 					ID:         "second-round-raise",
-					Title:      "第二轮继续加价",
+					Title:      "再次参与竞拍",
 					Body:       "第二轮重新竞拍。当前最高价是 P4 的 5；请把数字设为 8 并出价，继续留在竞拍中。",
 					Target:     "#bidAmountInput",
 					Targets:    []string{"#bidAmountInput", "#bidSubmitBtn"},
@@ -465,7 +561,7 @@ func introTutorialChapter() tutorialChapter {
 				},
 				{
 					ID:         "second-round-win",
-					Title:      "拿下港务长",
+					Title:      "赢得港务长竞拍",
 					Body:       "当前最高价是 P3 的 11。请出价 14；如果你最后成为港务长，就要支付最终竞拍价。",
 					Target:     "#bidAmountInput",
 					Targets:    []string{"#bidAmountInput", "#bidSubmitBtn"},
@@ -580,7 +676,7 @@ func placementTutorialChapter() tutorialChapter {
 				},
 				{
 					ID:         "placement-round-break",
-					Title:      "第一轮放置已经收尾",
+					Title:      "放置结束",
 					Body:       "第 1 轮剩余流程已自动推进完成：人参和肉豆蔻到港，丝绸进船坞；你放过的货船、港口和船坞位置会按这些结果结算。新一轮开始后，每位玩家又有 3 个同伙可放。",
 					Target:     tutorialContinueButtonTarget(),
 					Targets:    []string{tutorialContinueButtonTarget()},
@@ -669,7 +765,7 @@ func voyageTutorialChapter() tutorialChapter {
 			return []tutorialStep{
 				{
 					ID:         "voyage-pirate",
-					Title:      "放上海盗，等待航行触发",
+					Title:      "放置到海盗船",
 					Body:       "航行时，每艘出航货船都会独立掷骰，分别随机前进 1 到 6 格。请把同伙放到海盗船第 1 格，成为海盗船长；船长会优先处理海盗相关选择。",
 					Target:     `.pirate-overlay .board-slot[data-slot-id="1"]`,
 					Targets:    []string{`.pirate-overlay .board-slot[data-slot-id="1"]`, tutorialPlaceButtonTarget("pirate", 1)},
@@ -690,7 +786,7 @@ func voyageTutorialChapter() tutorialChapter {
 				},
 				{
 					ID:         "voyage-ship",
-					Title:      "放到货船并观察第 2 次移动",
+					Title:      "放置到肉豆蔻船",
 					Body:       "请把同伙放到肉豆蔻船。系统玩家完成放置后会继续航行；如果出现需要你处理的事件，教学会停下来。",
 					Target:     `.ship[data-ship-id="2"]`,
 					Targets:    []string{`.ship[data-ship-id="2"]`, tutorialPlaceButtonTarget("ship", 2)},
@@ -711,7 +807,7 @@ func voyageTutorialChapter() tutorialChapter {
 				},
 				{
 					ID:         "pirate-board",
-					Title:      "让海盗船长登船",
+					Title:      "海盗船长登上丝绸船",
 					Body:       "第 2 次移动后，丝绸船刚好停在 13，且船上还有空位。你是海盗船长，所以先由你决定是否登船。请让海盗船长登上丝绸船；登船后这名同伙会跟船走，不再留在海盗船上。",
 					Target:     `.ship[data-ship-id="3"]`,
 					Targets:    []string{`.ship[data-ship-id="3"]`, tutorialPirateBoardButtonTarget(3)},
@@ -745,7 +841,7 @@ func voyageTutorialChapter() tutorialChapter {
 				},
 				{
 					ID:         "small-navigator-move",
-					Title:      "执行小领航",
+					Title:      "执行小领航员行动",
 					Body:       "小领航最多移动 1 格，也可以不移动。这里把肉豆蔻船前进 1 格，人参船留在原位，然后点击“移动”。领航员把船移动到 13 不会触发海盗；海盗只会在掷骰移动后按规则触发。",
 					Target:     "#navSubmitBtn",
 					Targets:    []string{`.nav-move-input[data-ship-id="2"]`, "#navSubmitBtn"},
@@ -776,7 +872,7 @@ func voyageTutorialChapter() tutorialChapter {
 				},
 				{
 					ID:         "second-round-pirate",
-					Title:      "再次成为海盗船长",
+					Title:      "放置到海盗船",
 					Body:       "新一轮重新开始放置。请把同伙放到海盗船第 1 格，继续作为海盗船长。",
 					Target:     `.pirate-overlay .board-slot[data-slot-id="1"]`,
 					Targets:    []string{`.pirate-overlay .board-slot[data-slot-id="1"]`, tutorialPlaceButtonTarget("pirate", 1)},
@@ -804,7 +900,7 @@ func voyageTutorialChapter() tutorialChapter {
 				},
 				{
 					ID:         "second-round-sail-break",
-					Title:      "第二轮第 2 次航行",
+					Title:      "第 2 次航行",
 					Body:       "这一轮第 2 次航行后，又有货船停在 13，且船上还有空位。登船选择仍然由海盗船长先决定；这次你留在海盗船上，后面如果发生劫掠，船长才会参与决策。",
 					Target:     tutorialContinueButtonTarget(),
 					Targets:    []string{tutorialContinueButtonTarget()},
@@ -813,8 +909,8 @@ func voyageTutorialChapter() tutorialChapter {
 				},
 				{
 					ID:         "pirate-skip-board",
-					Title:      "这次留在海盗船上",
-					Body:       "第 2 次移动后再次出现可登船的目标。这次请点击“放弃”，让你作为海盗船长留在海盗船上。",
+					Title:      "选择留在海盗船上",
+					Body:       "第 2 次移动后再次出现可登船的目标。这次请点击“海盗留在船上”，让你作为海盗船长留在海盗船上。",
 					Target:     tutorialActionButtonTarget(model.ActionPirateSkipBoard, `{}`),
 					ActionType: model.ActionPirateSkipBoard,
 					Validate:   validateType(model.ActionPirateSkipBoard),
@@ -828,7 +924,7 @@ func voyageTutorialChapter() tutorialChapter {
 				},
 				{
 					ID:         "second-round-ship",
-					Title:      "完成本轮第 3 次放置",
+					Title:      "放置到肉豆蔻船",
 					Body:       "现在进入第 3 次放置。请把同伙放到肉豆蔻船；放置完成后按当前规则继续航行。",
 					Target:     `.ship[data-ship-id="2"]`,
 					Targets:    []string{`.ship[data-ship-id="2"]`, tutorialPlaceButtonTarget("ship", 2)},
@@ -840,7 +936,7 @@ func voyageTutorialChapter() tutorialChapter {
 				},
 				{
 					ID:         "big-navigator-move",
-					Title:      "执行大领航",
+					Title:      "执行大领航员行动",
 					Body:       "大领航总移动量最多 2，可以分给不同船，也可以不移动。把人参船设为 +1、肉豆蔻船设为 -1，然后点击“移动”。领航员把船移动到 13 不会触发海盗；海盗只会在掷骰移动后按规则触发。",
 					Target:     "#navSubmitBtn",
 					Targets:    []string{`.nav-move-input[data-ship-id="1"]`, `.nav-move-input[data-ship-id="2"]`, "#navSubmitBtn"},
@@ -849,8 +945,8 @@ func voyageTutorialChapter() tutorialChapter {
 				},
 				{
 					ID:         "pirate-loot-captain",
-					Title:      "船长决定劫掠去向",
-					Body:       "刚才先执行大领航员，再进行第 3 次掷骰。第 3 次移动后，丝绸船刚好停在 13，再次发生劫掠。你和副手都留在海盗船上，所以由你作为船长选择去港口还是船坞；这里选择“港口”。",
+					Title:      "决定丝绸船去向",
+					Body:       "刚才先执行大领航员，再进行第 3 次掷骰。第 3 次移动后，丝绸船刚好停在 13，再次发生劫掠。你和副手都留在海盗船上，所以由你作为船长选择去港口还是船坞；把丝绸船送往港口。",
 					Target:     `.destination-zone.port`,
 					Targets:    []string{`.destination-zone.port`, tutorialPirateDestinationButtonTarget(3, "port")},
 					ActionType: model.ActionPirateChooseDestination,
@@ -858,7 +954,7 @@ func voyageTutorialChapter() tutorialChapter {
 				},
 				{
 					ID:         "pirate-payout-break",
-					Title:      "海盗收益会和副手平分",
+					Title:      "海盗收益平分",
 					Body:       "劫掠处理后进入结算。事件区可以看到海盗收益来自被劫船，并由仍在海盗船上的船长和副手平分；登上货船的海盗不会参与这笔分配。",
 					Target:     tutorialContinueButtonTarget(),
 					Targets:    []string{tutorialContinueButtonTarget()},
@@ -885,7 +981,7 @@ func settlementTutorialChapter() tutorialChapter {
 				{
 					ID:         "confirm-settlement",
 					Title:      "确认完整结算",
-					Body:       "事件区记录了船上收益、港口收益、船坞收益、保险赔付和货物升值。本局里丝绸船进了船坞，保险商会先赔付船坞 A 的收益。成功到港的货物会升值，持有的股份最终会按市值计入资产。请点击确认结算，进入下一轮。",
+					Body:       "事件区记录了船上收益、港口收益、船坞收益、保险赔付和货物升值。本局里丝绸船进了船坞，保险商会先赔付船坞 A 的收益。成功到港的货物会升值，持有的股份最终会按市值计入资产。请点击“确认本轮结算”，进入下一轮。",
 					Target:     tutorialActionButtonTarget(model.ActionConfirmRound, `{}`),
 					Targets:    []string{tutorialActionButtonTarget(model.ActionConfirmRound, `{}`)},
 					ActionType: model.ActionConfirmRound,
@@ -906,7 +1002,7 @@ func settlementTutorialChapter() tutorialChapter {
 				},
 				{
 					ID:         "settlement-money-break",
-					Title:      "结算后进入资金不足局面",
+					Title:      "自动抵押说明",
 					Body:       "刚才系统完成了下一轮准备，并把你的现金设为 0、保留 1 张未抵押股份。现金不足且需要付款时，规则会先尝试抵押股份。",
 					Target:     tutorialContinueButtonTarget(),
 					Targets:    []string{tutorialContinueButtonTarget()},
@@ -934,7 +1030,7 @@ func settlementTutorialChapter() tutorialChapter {
 				},
 				{
 					ID:         "bankruptcy-break",
-					Title:      "没有现金和可抵押股份时",
+					Title:      "准备偷渡上船",
 					Body:       "刚才的放置已经通过自动抵押完成。现在你没有现金、没有可抵押股份，也没有 0 费普通位置可放，所以只能作为偷渡客上船。",
 					Target:     tutorialContinueButtonTarget(),
 					Targets:    []string{tutorialContinueButtonTarget()},
@@ -970,7 +1066,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 			return []tutorialStep{
 				{
 					ID:         "settlement-auction-bid",
-					Title:      "第 1 轮竞拍港务长",
+					Title:      "竞拍港务长",
 					Body:       "先出价 12 参与竞拍。港务长由最高出价者担任，系统玩家也会轮流出价或放弃。",
 					Target:     "#bidAmountInput",
 					Targets:    []string{"#bidAmountInput", "#bidSubmitBtn"},
@@ -990,7 +1086,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "settlement-auction-win",
-					Title:      "继续出价",
+					Title:      "继续竞拍",
 					Body:       "当前最高价是 16。请出价 20。",
 					Target:     "#bidAmountInput",
 					Targets:    []string{"#bidAmountInput", "#bidSubmitBtn"},
@@ -1002,7 +1098,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "settlement-skip-share",
-					Title:      "这轮先不买股份",
+					Title:      "跳过购买股份",
 					Body:       "港务长每轮可以买 1 张公开股份，也可以跳过。请点击“跳过购买股份”。",
 					Target:     tutorialActionButtonTarget(model.ActionSkipBuyShare, `{}`),
 					Targets:    []string{tutorialActionButtonTarget(model.ActionSkipBuyShare, `{}`)},
@@ -1029,7 +1125,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "settlement-place-ship",
-					Title:      "先上人参船",
+					Title:      "放置到人参船",
 					Body:       "把同伙放到人参船。货船位置的收益要等航行结果出来后再结算。",
 					Target:     `.ship[data-ship-id="1"]`,
 					Targets:    []string{`.ship[data-ship-id="1"]`, tutorialPlaceButtonTarget("ship", 1)},
@@ -1045,7 +1141,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "settlement-place-pirate",
-					Title:      "再做海盗船长",
+					Title:      "放置到海盗船",
 					Body:       "把同伙放到海盗船长位置；海盗船长负责处理海盗相关选择。",
 					Target:     `.pirate-overlay .board-slot[data-slot-id="1"]`,
 					Targets:    []string{`.pirate-overlay .board-slot[data-slot-id="1"]`, tutorialPlaceButtonTarget("pirate", 1)},
@@ -1061,7 +1157,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "settlement-place-insurance",
-					Title:      "最后做保险商",
+					Title:      "放置到保险商",
 					Body:       "把同伙放到保险商。保险商会立刻拿 10 比索；如果有船进入船坞，结算时要赔付对应船坞奖励。",
 					Target:     `.insurance-overlay .board-slot[data-slot-id="insurance"]`,
 					Targets:    []string{`.insurance-overlay .board-slot[data-slot-id="insurance"]`, tutorialPlaceButtonTarget("insurance", "insurance")},
@@ -1097,7 +1193,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "loot-to-port",
-					Title:      "先决定第一艘被劫船的去向",
+					Title:      "决定肉豆蔻船去向",
 					Body:       "两艘船在第 3 次移动后刚好停在 13，海盗船长要依次决定它们去港口还是船坞。先把肉豆蔻船送往港口；海盗的劫掠收益和去向无关，但送到港口的货物会在结算时涨价。",
 					Target:     `.destination-zone.port`,
 					Targets:    []string{`.destination-zone.port`, tutorialPirateDestinationButtonTarget(2, "port")},
@@ -1106,7 +1202,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "loot-to-dock",
-					Title:      "再决定第二艘被劫船的去向",
+					Title:      "决定丝绸船去向",
 					Body:       "现在把丝绸船送往船坞。即使被海盗劫掠后送进船坞，海盗仍然正常拿劫掠收益；船坞上有人时，保险商还要赔付对应的船坞奖励。",
 					Target:     `.destination-zone.dock`,
 					Targets:    []string{`.destination-zone.dock`, tutorialPirateDestinationButtonTarget(3, "dock")},
@@ -1133,7 +1229,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "settlement-insurance-break",
-					Title:      "保险商要赔船坞",
+					Title:      "保险商赔付船坞收益",
 					Body:       "你本轮还做了保险商，放置时先拿到 10 比索；但丝绸船被你送进船坞 A，船坞 A 有 P4 的同伙。船坞收益应由保险商支付，因此你需要支付 6 比索给 P4。保险商赚不赚，要看有没有船进船坞以及要赔多少。",
 					Target:     tutorialContinueButtonTarget(),
 					Targets:    []string{tutorialContinueButtonTarget()},
@@ -1152,7 +1248,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				{
 					ID:         "confirm-settlement",
 					Title:      "确认本轮结算",
-					Body:       "请点击“确认结算”。",
+					Body:       "请点击“确认本轮结算”。",
 					Target:     tutorialActionButtonTarget(model.ActionConfirmRound, `{}`),
 					Targets:    []string{tutorialActionButtonTarget(model.ActionConfirmRound, `{}`)},
 					ActionType: model.ActionConfirmRound,
@@ -1163,7 +1259,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "settlement-all-in-open",
-					Title:      "第 2 轮继续竞拍",
+					Title:      "参与竞拍",
 					Body:       "当前竞拍重新开始。请先出价 24。",
 					Target:     "#bidAmountInput",
 					Targets:    []string{"#bidAmountInput", "#bidSubmitBtn"},
@@ -1183,7 +1279,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "settlement-all-in-auction",
-					Title:      "第 2 轮继续加价",
+					Title:      "继续竞拍",
 					Body:       "当前最高价是 36。请出价 44。",
 					Target:     "#bidAmountInput",
 					Targets:    []string{"#bidAmountInput", "#bidSubmitBtn"},
@@ -1195,8 +1291,8 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "settlement-all-in-skip-share",
-					Title:      "没有现金时跳过买股",
-					Body:       "你已经拍下港务长。现在没有现金购买股份，请点击“跳过购买股份”。",
+					Title:      "跳过买股",
+					Body:       "你已经拍下港务长。这里先不购买股份，请点击“跳过购买股份”。",
 					Target:     tutorialActionButtonTarget(model.ActionSkipBuyShare, `{}`),
 					Targets:    []string{tutorialActionButtonTarget(model.ActionSkipBuyShare, `{}`)},
 					ActionType: model.ActionSkipBuyShare,
@@ -1226,7 +1322,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "auto-mortgage-pirate",
-					Title:      "自动抵押后放海盗",
+					Title:      "自动抵押后放置到海盗船",
 					Body:       "请把同伙放到海盗船长位置。你不需要先找抵押按钮；支付 5 比索但现金不足时，规则会自动抵押 1 张股份。抵押会立刻给 12 比索，但最终计分时每张抵押股份会扣 15。",
 					Target:     `.pirate-overlay .board-slot[data-slot-id="1"]`,
 					Targets:    []string{`.pirate-overlay .board-slot[data-slot-id="1"]`, tutorialPlaceButtonTarget("pirate", 1)},
@@ -1242,7 +1338,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "insurance-loss-ship",
-					Title:      "再买一个 5 比索船位",
+					Title:      "放置到丝绸船",
 					Body:       "第 1 次移动后，把同伙放到丝绸船。前两个位置已经被系统玩家占了，你买的是第 3 格，费用正好是 5。",
 					Target:     `.ship[data-ship-id="3"]`,
 					Targets:    []string{`.ship[data-ship-id="3"]`, tutorialPlaceButtonTarget("ship", 3)},
@@ -1258,7 +1354,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "insurance-loss-insurance",
-					Title:      "最后做保险商",
+					Title:      "放置到保险商",
 					Body:       "第 2 次移动后，再放到保险商。保险商会立刻拿 10 比索；结算时如果有船进入船坞，就按实际触发的船坞奖励赔付。",
 					Target:     `.insurance-overlay .board-slot[data-slot-id="insurance"]`,
 					Targets:    []string{`.insurance-overlay .board-slot[data-slot-id="insurance"]`, tutorialPlaceButtonTarget("insurance", "insurance")},
@@ -1285,7 +1381,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "insurance-loss-break",
-					Title:      "投入没有回报时的赔付压力",
+					Title:      "保险商赔付压力",
 					Body:       "结算时，进入船坞的船会按船坞 A、B、C 的顺序结算；有同伙占据的船坞收益由保险商支付。保险商放置时先拿 10 比索，但本轮需要支付实际触发的船坞奖励。现金和可抵押股份都用完时，最低扣到 0，不会变成负数，差额由银行补足。",
 					Target:     tutorialContinueButtonTarget(),
 					Targets:    []string{tutorialContinueButtonTarget()},
@@ -1294,8 +1390,8 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "confirm-loss-settlement",
-					Title:      "确认这轮亏损结算",
-					Body:       "你现在已经没有现金，也没有可抵押股份。请点击“确认结算”。",
+					Title:      "确认本轮结算",
+					Body:       "你现在已经没有现金，也没有可抵押股份。请点击“确认本轮结算”。",
 					Target:     tutorialActionButtonTarget(model.ActionConfirmRound, `{}`),
 					Targets:    []string{tutorialActionButtonTarget(model.ActionConfirmRound, `{}`)},
 					ActionType: model.ActionConfirmRound,
@@ -1306,8 +1402,8 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "bankruptcy-auction-pass",
-					Title:      "没钱时放弃竞拍",
-					Body:       "你现在现金为 0，也没有可抵押股份，不能出价争港务长。请在竞拍阶段选择放弃。",
+					Title:      "放弃竞拍",
+					Body:       "本轮不参与港务长竞拍，请点击“放弃”。",
 					Target:     tutorialActionButtonTarget(model.ActionPassBid, `{}`),
 					Targets:    []string{tutorialActionButtonTarget(model.ActionPassBid, `{}`)},
 					ActionType: model.ActionPassBid,
@@ -1322,7 +1418,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "bankruptcy-break",
-					Title:      "没有现金和可抵押股份时",
+					Title:      "准备偷渡上船",
 					Body:       "出航准备已经完成。你没有现金、没有可抵押股份，也没有 0 费普通位置可放，所以本轮轮到你放置时，只能作为偷渡客上船。",
 					Target:     tutorialContinueButtonTarget(),
 					Targets:    []string{tutorialContinueButtonTarget()},
@@ -1377,7 +1473,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				{
 					ID:         "confirm-stowaway-settlement",
 					Title:      "确认偷渡收益",
-					Body:       "偷渡收益让你重新有了现金。请点击“确认结算”。",
+					Body:       "偷渡收益让你重新有了现金。请点击“确认本轮结算”。",
 					Target:     tutorialActionButtonTarget(model.ActionConfirmRound, `{}`),
 					Targets:    []string{tutorialActionButtonTarget(model.ActionConfirmRound, `{}`)},
 					ActionType: model.ActionConfirmRound,
@@ -1399,7 +1495,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "round4-auction-bid",
-					Title:      "第 4 轮竞拍",
+					Title:      "竞拍港务长",
 					Body:       "当前最高价是 10。请出价 14 争港务长；竞拍会按最高有效出价结算。",
 					Target:     "#bidAmountInput",
 					Targets:    []string{"#bidAmountInput", "#bidSubmitBtn"},
@@ -1442,7 +1538,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "round4-place-silk",
-					Title:      "第 4 轮：先上丝绸船",
+					Title:      "放置到丝绸船",
 					Body:       "丝绸船起点靠前，船上位置的收益也很直观。先把同伙放到丝绸船；货船成功到港时，船上的同伙会参与船上收益分配。",
 					Target:     `.ship[data-ship-id="3"]`,
 					Targets:    []string{`.ship[data-ship-id="3"]`, tutorialPlaceButtonTarget("ship", 3)},
@@ -1454,7 +1550,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "round4-place-pirate",
-					Title:      "第 1 次移动后再买海盗",
+					Title:      "放置到海盗船",
 					Body:       "第 1 次移动后，船位已经变化。现在把同伙放到海盗船长位置；海盗船长在发生海盗事件时负责处理去向选择。",
 					Target:     `.pirate-overlay .board-slot[data-slot-id="1"]`,
 					Targets:    []string{`.pirate-overlay .board-slot[data-slot-id="1"]`, tutorialPlaceButtonTarget("pirate", 1)},
@@ -1466,7 +1562,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "round4-place-port",
-					Title:      "押至少一艘到港",
+					Title:      "放置到港口 A",
 					Body:       "丝绸船已经到港。港口 A 的条件是至少一艘船到港；现在放到港口 A，付出 4 比索成本，结算时可以稳定拿到 6 比索奖励。",
 					Target:     `.port-overlay .board-slot[data-slot-id="A"]`,
 					Targets:    []string{`.port-overlay .board-slot[data-slot-id="A"]`, tutorialPlaceButtonTarget("port", "A")},
@@ -1478,8 +1574,8 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "round4-loot-ginseng",
-					Title:      "劫掠后送往港口",
-					Body:       "第 3 次移动后，人参船刚好停在 13。你是海盗船长，这里选择送往港口：海盗获得劫掠收益，人参仍会按到港货物升值。",
+					Title:      "决定人参船去向",
+					Body:       "第 3 次移动后，人参船刚好停在 13。你是海盗船长，把人参船送往港口：海盗获得劫掠收益，人参仍会按到港货物升值。",
 					Target:     `.destination-zone.port`,
 					Targets:    []string{`.destination-zone.port`, tutorialPirateDestinationButtonTarget(1, "port")},
 					ActionType: model.ActionPirateChooseDestination,
@@ -1496,8 +1592,8 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "confirm-round4-profit",
-					Title:      "确认第 4 轮收益",
-					Body:       "请点击“确认结算”。",
+					Title:      "确认本轮结算",
+					Body:       "请点击“确认本轮结算”。",
 					Target:     tutorialActionButtonTarget(model.ActionConfirmRound, `{}`),
 					Targets:    []string{tutorialActionButtonTarget(model.ActionConfirmRound, `{}`)},
 					ActionType: model.ActionConfirmRound,
@@ -1508,7 +1604,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "round5-auction-bid",
-					Title:      "第 5 轮竞拍",
+					Title:      "竞拍港务长",
 					Body:       "请先出价 8 参与竞拍。",
 					Target:     "#bidAmountInput",
 					Targets:    []string{"#bidAmountInput", "#bidSubmitBtn"},
@@ -1528,7 +1624,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "round5-auction-win",
-					Title:      "继续出价",
+					Title:      "继续竞拍",
 					Body:       "当前最高价是 12。请出价 16。",
 					Target:     "#bidAmountInput",
 					Targets:    []string{"#bidAmountInput", "#bidSubmitBtn"},
@@ -1540,7 +1636,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "round5-buy-share",
-					Title:      "再买人参股份",
+					Title:      "购买人参股份",
 					Body:       "你是港务长，可以购买 1 张公开股份。请购买 1 张人参股份；股份最终会按对应货物市值计入资产。",
 					Target:     `[data-goods-id="1"]`,
 					Targets:    []string{`[data-goods-id="1"]`, tutorialActionButtonTarget(model.ActionBuyShare, `{\"goodsId\":1}`)},
@@ -1549,7 +1645,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "round5-select-goods",
-					Title:      "选择本轮货物",
+					Title:      "选择本轮出航货物",
 					Body:       "请选择人参、丝绸和玉石出航，再点击“确认出航”。",
 					Target:     "#selectGoodsSubmitBtn",
 					Targets:    []string{`[data-goods-id="1"]`, `[data-goods-id="3"]`, `[data-goods-id="4"]`, "#selectGoodsSubmitBtn"},
@@ -1571,7 +1667,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "round5-place-ginseng",
-					Title:      "第 5 轮：上人参船",
+					Title:      "放置到人参船",
 					Body:       "人参船起点靠前，先把同伙放到人参船；如果货船到港，船上同伙会先按船上收益结算，之后再处理货物升值。",
 					Target:     `.ship[data-ship-id="1"]`,
 					Targets:    []string{`.ship[data-ship-id="1"]`, tutorialPlaceButtonTarget("ship", 1)},
@@ -1583,7 +1679,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "round5-place-silk",
-					Title:      "再上丝绸船",
+					Title:      "放置到丝绸船",
 					Body:       "丝绸船当前位置也靠前，把同伙放到丝绸船。",
 					Target:     `.ship[data-ship-id="3"]`,
 					Targets:    []string{`.ship[data-ship-id="3"]`, tutorialPlaceButtonTarget("ship", 3)},
@@ -1595,7 +1691,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "round5-place-port",
-					Title:      "押至少两艘到港",
+					Title:      "放置到港口 B",
 					Body:       "已经有一艘船到港。把同伙放到港口 B；港口 B 需要至少两艘船到港才会结算。",
 					Target:     `.port-overlay .board-slot[data-slot-id="B"]`,
 					Targets:    []string{`.port-overlay .board-slot[data-slot-id="B"]`, tutorialPlaceButtonTarget("port", "B")},
@@ -1607,7 +1703,7 @@ func settlementTutorialChapterV2() tutorialChapter {
 				},
 				{
 					ID:         "round5-settlement-break",
-					Title:      "第 5 轮结算",
+					Title:      "本轮结算",
 					Body:       "第 5 轮结算已完成。你通过人参船获得 18 比索、丝绸船获得 30 比索、港口 B 获得 8 比索，本轮合计收益 56 比索。根据到港情况，人参股价上涨到 30，丝绸股价上涨到 20。",
 					Target:     tutorialContinueButtonTarget(),
 					Targets:    []string{tutorialContinueButtonTarget()},

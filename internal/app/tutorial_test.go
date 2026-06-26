@@ -46,6 +46,42 @@ func TestTutorialChaptersAreMergedAndOldIDsMap(t *testing.T) {
 func TestTutorialStepsHaveClearGuideTargetsAndNoHighlightWording(t *testing.T) {
 	svc := NewService(store.NewMemoryStore(), rules.NewEngine())
 	classroomPhrases := []string{"高亮", "本教学", "本步", "适合用来", "方便理解", "学习", "通常不会", "急着"}
+	forbiddenTitlePhrases := []string{
+		"拿下",
+		"买海盗",
+		"做海盗",
+		"做保险商",
+		"先上",
+		"再上",
+		"再买一个",
+		"再买人参股份",
+		"投入没有回报",
+		"继续加价",
+		"押至少",
+		"劫掠后送往港口",
+		"第 1 轮",
+		"第 2 轮",
+		"第 3 轮",
+		"第 4 轮",
+		"第 5 轮",
+		"第一轮",
+		"第二轮",
+		"第三轮",
+		"第四轮",
+		"第五轮",
+		"没有现金时",
+		"没钱时",
+	}
+	allowedQuotedButtonLabels := map[string]bool{
+		"出价":     true,
+		"放弃":     true,
+		"海盗留在船上": true,
+		"确认出航":   true,
+		"确认本轮结算": true,
+		"移动":     true,
+		"跳过购买股份": true,
+	}
+	quotedText := regexp.MustCompile(`“([^”]+)”`)
 	scriptIntentPhrases := []string{
 		"本章从",
 		"按正常流程",
@@ -85,8 +121,21 @@ func TestTutorialStepsHaveClearGuideTargetsAndNoHighlightWording(t *testing.T) {
 			if step.ID == "" || step.Title == "" || step.Body == "" {
 				t.Fatalf("chapter %s has incomplete step metadata: %+v", chapter.ID, step)
 			}
+			for _, phrase := range forbiddenTitlePhrases {
+				if strings.Contains(step.Title, phrase) {
+					t.Fatalf("chapter %s step %s has informal or misleading title phrase %q: %q", chapter.ID, step.ID, phrase, step.Title)
+				}
+			}
 			if step.ActionType == "" {
 				t.Fatalf("chapter %s step %s has no action type", chapter.ID, step.ID)
+			}
+			if step.ActionType != model.ActionTutorialContinue {
+				if strings.Count(step.Body, "**")%2 != 0 {
+					t.Fatalf("chapter %s step %s has unmatched emphasis marker: %q", chapter.ID, step.ID, step.Body)
+				}
+				if !strings.Contains(step.Body, "**") {
+					t.Fatalf("chapter %s step %s should mark the required action in the backend body: %q", chapter.ID, step.ID, step.Body)
+				}
 			}
 			if step.Target == "" && len(step.Targets) == 0 {
 				t.Fatalf("chapter %s step %s has no guide target", chapter.ID, step.ID)
@@ -127,6 +176,22 @@ func TestTutorialStepsHaveClearGuideTargetsAndNoHighlightWording(t *testing.T) {
 					if !strings.Contains(step.Body, phrase) {
 						t.Fatalf("round5-place-port should explain port B condition %q, got %q", phrase, step.Body)
 					}
+				}
+			}
+			if step.ID == "pirate-skip-board" {
+				if strings.Contains(step.Body, "点击“放弃”") || strings.Contains(step.Body, "**请点击“放弃”**") {
+					t.Fatalf("pirate-skip-board should name the actual action button, got %q", step.Body)
+				}
+				if !strings.Contains(step.Body, "海盗留在船上") {
+					t.Fatalf("pirate-skip-board should name the actual action button, got %q", step.Body)
+				}
+			}
+			if strings.Contains(step.Body, "确认结算") {
+				t.Fatalf("tutorial should use the actual ConfirmRound button label 确认本轮结算, got %q", step.Body)
+			}
+			for _, match := range quotedText.FindAllStringSubmatch(step.Body, -1) {
+				if len(match) < 2 || !allowedQuotedButtonLabels[match[1]] {
+					t.Fatalf("chapter %s step %s quotes a non-button or unknown label %q in %q", chapter.ID, step.ID, match[1], step.Body)
 				}
 			}
 			if step.ID == "insurance-loss-break" {

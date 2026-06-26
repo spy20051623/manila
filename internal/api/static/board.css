@@ -2099,6 +2099,11 @@ input {
   line-height: 1.45;
 }
 
+.tutorial-body strong {
+  color: #2f1d0d;
+  font-weight: 900;
+}
+
 .tutorial-actions {
   display: flex;
   flex-wrap: wrap;
@@ -2119,16 +2124,25 @@ input {
 .tutorial-focus {
   position: relative;
   z-index: 70;
-  outline: 3px solid rgba(255, 226, 99, 0.96) !important;
+  outline: 3px solid rgba(220, 48, 48, 0);
   outline-offset: 4px;
   box-shadow:
-    0 0 0 6px rgba(255, 226, 99, 0.24),
-    0 0 24px rgba(255, 211, 64, 0.62) !important;
+    0 0 0 6px rgba(220, 48, 48, 0),
+    0 0 24px rgba(210, 35, 35, 0);
+  animation: tutorialFocusPulse 1.5s ease-in-out infinite;
 }
 
 .tutorial-focus input,
 input.tutorial-focus {
   background: #fff3bd !important;
+}
+
+.sea-overlay .ship.tutorial-focus {
+  outline-color: rgba(220, 48, 48, 0.7);
+  box-shadow:
+    0 0 0 5px rgba(220, 48, 48, 0.34),
+    0 0 22px rgba(210, 35, 35, 0.62);
+  animation: tutorialShipFocusPulse 1.5s ease-in-out infinite;
 }
 
 .name-dialog-overlay {
@@ -2928,14 +2942,104 @@ input.tutorial-focus {
 }
 
 .actions-list .action-btn.tutorial-focus {
-  border-color: rgba(93, 53, 18, 0.92) !important;
-  outline: 2px solid rgba(93, 53, 18, 0.48) !important;
-  outline-offset: 1px;
-  background: linear-gradient(180deg, rgba(255, 240, 173, 0.92), rgba(217, 168, 74, 0.78)) !important;
+  position: relative;
+  overflow: hidden;
+  animation: tutorialActionFocusPulse 1.5s ease-in-out infinite;
+  border-color: rgba(81, 45, 20, 0.52);
+  outline: none;
+  background: linear-gradient(180deg, #fff8e8, #e6c896);
   box-shadow:
-    inset 0 1px 0 rgba(255, 252, 221, 0.78),
-    inset 0 -2px 0 rgba(92, 54, 18, 0.22),
-    0 2px 5px rgba(40, 24, 12, 0.18) !important;
+    0 1px 0 rgba(255, 251, 228, 0.78) inset,
+    0 -2px 0 rgba(88, 47, 21, 0.22) inset,
+    0 2px 5px rgba(40, 24, 12, 0.18);
+}
+
+.actions-list .action-btn.tutorial-focus::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(255, 229, 92, 0.96), rgba(223, 143, 32, 0.9));
+  opacity: 0;
+  animation: tutorialActionFocusOverlayPulse 1.5s ease-in-out infinite;
+}
+
+.actions-list .action-btn.tutorial-focus > * {
+  position: relative;
+  z-index: 1;
+}
+
+@keyframes tutorialFocusPulse {
+  0%,
+  100% {
+    outline-color: rgba(220, 48, 48, 0);
+    box-shadow:
+      0 0 0 6px rgba(220, 48, 48, 0),
+      0 0 24px rgba(210, 35, 35, 0);
+  }
+  50% {
+    outline-color: rgba(220, 48, 48, 0.94);
+    box-shadow:
+      0 0 0 6px rgba(220, 48, 48, 0.28),
+      0 0 24px rgba(210, 35, 35, 0.62);
+  }
+}
+
+@keyframes tutorialShipFocusPulse {
+  0%,
+  100% {
+    outline-color: rgba(220, 48, 48, 0.72);
+    box-shadow:
+      0 0 0 5px rgba(220, 48, 48, 0.36),
+      0 0 22px rgba(210, 35, 35, 0.64);
+  }
+  50% {
+    outline-color: rgb(232, 36, 36);
+    box-shadow:
+      0 0 0 7px rgba(232, 36, 36, 0.86),
+      0 0 34px rgba(190, 22, 22, 0.9);
+  }
+}
+
+@keyframes tutorialActionFocusPulse {
+  0%,
+  100% {
+    border-color: rgba(81, 45, 20, 0.52);
+    box-shadow:
+      0 1px 0 rgba(255, 251, 228, 0.78) inset,
+      0 -2px 0 rgba(88, 47, 21, 0.22) inset,
+      0 2px 5px rgba(40, 24, 12, 0.18);
+  }
+  50% {
+    border-color: rgba(116, 62, 12, 0.96);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 249, 197, 0.86),
+      inset 0 -2px 0 rgba(104, 54, 12, 0.28),
+      0 2px 6px rgba(62, 34, 10, 0.24);
+  }
+}
+
+@keyframes tutorialActionFocusOverlayPulse {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tutorial-focus,
+  .actions-list .action-btn.tutorial-focus {
+    animation: none;
+  }
+
+  .actions-list .action-btn.tutorial-focus::before {
+    animation: none;
+    opacity: 1;
+  }
 }
 
 .ship-float {

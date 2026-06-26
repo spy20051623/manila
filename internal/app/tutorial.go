@@ -250,6 +250,10 @@ func (s *Service) tutorialView(session *tutorialSession, g *model.Game) (model.T
 		view.CompletionTitle = "恭喜完成新手引导"
 		view.CompletionBody = "你已经完成全部新手教学，并在这局获得第一名。现在可以查看最终结算，或回到大厅开始正式对局。"
 	}
+	if session.Completed && chapter.ID == "overview" {
+		view.CompletionTitle = "完成概览"
+		view.CompletionBody = "你已经看过一局游戏的大框架：先竞拍港务长，再出航、放置、航行、结算，最后按现金和股票计算胜负。下一章开始亲自操作竞拍与出航准备。"
+	}
 	if !session.Completed && session.StepIndex >= 0 && session.StepIndex < len(steps) {
 		step := steps[session.StepIndex]
 		view.StepID = step.ID
@@ -444,10 +448,144 @@ func tutorialLegalCandidateAllowed(step tutorialStep, act model.LegalAction) boo
 
 func tutorialChapters() []tutorialChapter {
 	return []tutorialChapter{
+		overviewTutorialChapter(),
 		introTutorialChapter(),
 		placementTutorialChapter(),
 		voyageTutorialChapter(),
 		settlementTutorialChapterV2(),
+	}
+}
+
+func overviewTutorialChapter() tutorialChapter {
+	return tutorialChapter{
+		ID:          "overview",
+		Title:       "新手概览",
+		Description: "先看完一局演示，了解游戏目标、每轮流程和终局结算。",
+		Seed:        2026062601,
+		Build: func(s *Service, g *model.Game) ([]tutorialStep, error) {
+			return []tutorialStep{
+				{
+					ID:         "overview-goal",
+					Title:      "游戏目标",
+					Body:       "这是一场 4 人竞争游戏。玩家通过竞拍港务长、购买股份、派同伙押注航行结果来赚取现金。游戏结束时，最终资产最高的人获胜；最终资产来自现金、股票价值，并扣除未还贷款。",
+					Target:     tutorialContinueButtonTarget(),
+					Targets:    []string{tutorialContinueButtonTarget()},
+					ActionType: model.ActionTutorialContinue,
+					Validate:   validateType(model.ActionTutorialContinue),
+					After: func(s *Service, g *model.Game) error {
+						return ensureStarted(s, g)
+					},
+				},
+				{
+					ID:         "overview-auction",
+					Title:      "竞拍港务长",
+					Body:       "现在进入竞拍阶段。每轮先竞拍港务长，出价最高的玩家成为本轮港务长；港务长之后会负责买股、选出航货物和设置货船起点。",
+					Target:     tutorialContinueButtonTarget(),
+					Targets:    []string{tutorialContinueButtonTarget()},
+					ActionType: model.ActionTutorialContinue,
+					Validate:   validateType(model.ActionTutorialContinue),
+					After: func(s *Service, g *model.Game) error {
+						return scriptOverviewAuctionToPreparation(s, g)
+					},
+				},
+				{
+					ID:         "overview-preparation",
+					Title:      "出航准备",
+					Body:       "竞拍结束后进入出航准备。港务长每轮最多买 1 张公开股份，然后选择 3 种货物出航，并设置 3 艘货船的起点；三个起点数字加起来必须等于 9。",
+					Target:     tutorialContinueButtonTarget(),
+					Targets:    []string{tutorialContinueButtonTarget()},
+					ActionType: model.ActionTutorialContinue,
+					Validate:   validateType(model.ActionTutorialContinue),
+					After: func(s *Service, g *model.Game) error {
+						return scriptOverviewPreparationToPlacement(s, g)
+					},
+				},
+				{
+					ID:         "overview-placement",
+					Title:      "放置同伙",
+					Body:       "出航准备完成后进入放置阶段。每名玩家每轮有 3 个同伙，把同伙放到货船、港口、船坞、海盗、领航员或保险商，就是押不同的航行结果。",
+					Target:     tutorialContinueButtonTarget(),
+					Targets:    []string{tutorialContinueButtonTarget()},
+					ActionType: model.ActionTutorialContinue,
+					Validate:   validateType(model.ActionTutorialContinue),
+					After: func(s *Service, g *model.Game) error {
+						return scriptOverviewToFirstSailing(s, g)
+					},
+				},
+				{
+					ID:         "overview-first-sailing",
+					Title:      "第一次航行",
+					Body:       "第一轮放置后，货船开始航行。每艘出航货船都会独立随机前进 1-6 步；船的位置会影响它到港、进船坞或触发海盗事件的可能性。",
+					Target:     tutorialContinueButtonTarget(),
+					Targets:    []string{tutorialContinueButtonTarget()},
+					ActionType: model.ActionTutorialContinue,
+					Validate:   validateType(model.ActionTutorialContinue),
+					After: func(s *Service, g *model.Game) error {
+						return scriptOverviewToRoundReview(s, g)
+					},
+				},
+				{
+					ID:         "overview-events",
+					Title:      "航行事件",
+					Body:       "一轮航行中可能遇到海盗、领航员、保险商赔付、货船到港或进船坞等事件。这里先知道它们都属于航行过程；后续章节会逐步让你亲自处理。",
+					Target:     tutorialContinueButtonTarget(),
+					Targets:    []string{tutorialContinueButtonTarget()},
+					ActionType: model.ActionTutorialContinue,
+					Validate:   validateType(model.ActionTutorialContinue),
+				},
+				{
+					ID:         "overview-settlement",
+					Title:      "本轮结算",
+					Body:       "航行结束后进入结算。货船、港口、船坞、海盗和保险商会按规则依次结算；押中的位置获得现金，没押中的位置通常没有收益。",
+					Target:     tutorialContinueButtonTarget(),
+					Targets:    []string{tutorialContinueButtonTarget()},
+					ActionType: model.ActionTutorialContinue,
+					Validate:   validateType(model.ActionTutorialContinue),
+				},
+				{
+					ID:         "overview-market",
+					Title:      "货物涨价",
+					Body:       "结算时，成功到港的货物股价会上涨。股票最终会按对应货物的当前市值计入资产，所以货物能否到港会影响长期得分。",
+					Target:     tutorialContinueButtonTarget(),
+					Targets:    []string{tutorialContinueButtonTarget()},
+					ActionType: model.ActionTutorialContinue,
+					Validate:   validateType(model.ActionTutorialContinue),
+					After: func(s *Service, g *model.Game) error {
+						return scriptOverviewToMidgame(s, g)
+					},
+				},
+				{
+					ID:         "overview-midgame",
+					Title:      "多轮重复",
+					Body:       "现在已经推进过几轮。每轮都会重复竞拍、出航准备、放置同伙、航行和结算，但现金、股票价格和船位会不断改变局面。",
+					Target:     tutorialContinueButtonTarget(),
+					Targets:    []string{tutorialContinueButtonTarget()},
+					ActionType: model.ActionTutorialContinue,
+					Validate:   validateType(model.ActionTutorialContinue),
+					After: func(s *Service, g *model.Game) error {
+						return scriptOverviewToGameEnd(s, g)
+					},
+				},
+				{
+					ID:         "overview-game-end",
+					Title:      "游戏结束判定",
+					Body:       "游戏规定：当任意一种股票的价格达到 30 时，当前回合结算完成后游戏结束。现在已经有货物股价到达 30，因此这局进入终局结算。",
+					Target:     tutorialContinueButtonTarget(),
+					Targets:    []string{tutorialContinueButtonTarget()},
+					ActionType: model.ActionTutorialContinue,
+					Validate:   validateType(model.ActionTutorialContinue),
+				},
+				{
+					ID:         "overview-final-score",
+					Title:      "终局资产结算",
+					Body:       "终局资产 = 现金 + 股票价值 - 抵押股票赎金。现金来自航行中的收益，股票价值来自持有股份和当前股价，未还贷款会在最后扣分。",
+					Target:     tutorialContinueButtonTarget(),
+					Targets:    []string{tutorialContinueButtonTarget()},
+					ActionType: model.ActionTutorialContinue,
+					Validate:   validateType(model.ActionTutorialContinue),
+				},
+			}, nil
+		},
 	}
 }
 
@@ -1758,6 +1896,8 @@ func tutorialChapterByID(id string) *tutorialChapter {
 
 func canonicalTutorialChapterID(id string) string {
 	switch id {
+	case "overview":
+		return "overview"
 	case "auction", "harbor":
 		return "intro"
 	case "placement", "special":
@@ -1795,6 +1935,158 @@ func ensureStarted(s *Service, g *model.Game) error {
 		return nil
 	}
 	return s.engine.StartGame(g)
+}
+
+func scriptOverviewAuctionToPreparation(s *Service, g *model.Game) error {
+	if err := ensureStarted(s, g); err != nil {
+		return err
+	}
+	if g.Phase != model.PhaseAuction {
+		return fmt.Errorf("expected overview auction phase, got %s", g.Phase)
+	}
+	if err := applyScriptActions(s, g,
+		model.Action{PlayerID: 1, Type: model.ActionBid, Payload: map[string]interface{}{"amount": 8}},
+		model.Action{PlayerID: 2, Type: model.ActionPassBid},
+		model.Action{PlayerID: 3, Type: model.ActionPassBid},
+		model.Action{PlayerID: 4, Type: model.ActionPassBid},
+	); err != nil {
+		return err
+	}
+	if g.Phase != model.PhaseHarborMasterBuyShare || g.HarborMaster != 1 {
+		return fmt.Errorf("expected P1 harbor master preparation, phase=%s harborMaster=%d", g.Phase, g.HarborMaster)
+	}
+	return nil
+}
+
+func scriptOverviewPreparationToPlacement(s *Service, g *model.Game) error {
+	if g.Phase != model.PhaseHarborMasterBuyShare || g.HarborMaster != 1 {
+		return fmt.Errorf("expected overview preparation phase, phase=%s harborMaster=%d", g.Phase, g.HarborMaster)
+	}
+	if err := applyScriptActions(s, g,
+		model.Action{PlayerID: 1, Type: model.ActionBuyShare, Payload: map[string]interface{}{"goodsId": 1}},
+		model.Action{PlayerID: 1, Type: model.ActionSelectGoods, Payload: map[string]interface{}{"goodsIds": []interface{}{1, 2, 3}}},
+		model.Action{PlayerID: 1, Type: model.ActionSetShipStarts, Payload: map[string]interface{}{"starts": map[string]interface{}{"1": 4, "2": 3, "3": 2}}},
+	); err != nil {
+		return err
+	}
+	if g.Phase != model.PhasePlacement {
+		return fmt.Errorf("expected overview placement phase, got %s", g.Phase)
+	}
+	return nil
+}
+
+func scriptOverviewToFirstSailing(s *Service, g *model.Game) error {
+	startMovement := g.Round.MovementStep
+	return scriptOverviewUntil(s, g, 80, func(g *model.Game) bool {
+		return g.Round.MovementStep > startMovement
+	})
+}
+
+func scriptOverviewToRoundReview(s *Service, g *model.Game) error {
+	return scriptOverviewUntil(s, g, 180, func(g *model.Game) bool {
+		return g.Phase == model.PhaseRoundReview
+	})
+}
+
+func scriptOverviewToMidgame(s *Service, g *model.Game) error {
+	startRound := g.RoundNumber
+	return scriptOverviewUntil(s, g, 600, func(g *model.Game) bool {
+		return g.Phase == model.PhaseAuction && g.RoundNumber >= startRound+2
+	})
+}
+
+func scriptOverviewToGameEnd(s *Service, g *model.Game) error {
+	return scriptOverviewUntil(s, g, 2400, func(g *model.Game) bool {
+		return g.Status == model.StatusEnded && g.Phase == model.PhaseGameEnd
+	})
+}
+
+func scriptOverviewUntil(s *Service, g *model.Game, max int, done func(*model.Game) bool) error {
+	for i := 0; i < max; i++ {
+		if done(g) {
+			return nil
+		}
+		current := roomActorForPhase(g)
+		if g.Phase == model.PhaseRoundReview {
+			current = g.CurrentPlayer
+		}
+		if current == 0 {
+			return fmt.Errorf("no actor while overview scripting phase %s", g.Phase)
+		}
+		action, err := overviewScriptAction(s, g, current)
+		if err != nil {
+			return err
+		}
+		if err := s.engine.ApplyAction(g, action); err != nil {
+			return err
+		}
+	}
+	return fmt.Errorf("overview script did not reach target from round %d phase %s", g.RoundNumber, g.Phase)
+}
+
+func overviewScriptAction(s *Service, g *model.Game, playerID int) (model.Action, error) {
+	acts, err := s.engine.LegalActions(g, playerID)
+	if err != nil {
+		return model.Action{}, err
+	}
+	if len(acts) == 0 {
+		return model.Action{}, fmt.Errorf("no overview script action for player %d", playerID)
+	}
+	for _, preferred := range []func(model.LegalAction) bool{
+		func(a model.LegalAction) bool { return a.Type == model.ActionConfirmRound },
+		func(a model.LegalAction) bool { return a.Type == model.ActionPirateSkipBoard },
+		func(a model.LegalAction) bool {
+			return a.Type == model.ActionNavigatorMove || a.Type == model.ActionNavigatorSkip
+		},
+		func(a model.LegalAction) bool { return a.Type == model.ActionPirateChooseDestination },
+		func(a model.LegalAction) bool { return a.Type == model.ActionBuyShare },
+		func(a model.LegalAction) bool { return a.Type == model.ActionSelectGoods },
+		func(a model.LegalAction) bool { return a.Type == model.ActionSetShipStarts },
+		func(a model.LegalAction) bool {
+			return a.Type == model.ActionPlaceAccomplice && fmt.Sprint(a.Payload["positionType"]) == overviewPreferredPlacement(g, playerID)
+		},
+		func(a model.LegalAction) bool {
+			return a.Type == model.ActionPlaceAccomplice && fmt.Sprint(a.Payload["positionType"]) == "ship"
+		},
+		func(a model.LegalAction) bool { return a.Type == model.ActionPlaceAccomplice },
+		func(a model.LegalAction) bool { return a.Type == model.ActionSkipBuyShare },
+		func(a model.LegalAction) bool { return a.Type == model.ActionPassBid },
+	} {
+		for _, act := range acts {
+			if preferred(act) {
+				payload := copyPayload(act.Payload)
+				if act.Type == model.ActionSelectGoods {
+					payload = map[string]interface{}{"goodsIds": []interface{}{1, 2, 3}}
+				}
+				if act.Type == model.ActionSetShipStarts {
+					payload = map[string]interface{}{"starts": map[string]interface{}{"1": 4, "2": 3, "3": 2}}
+				}
+				if act.Type == model.ActionNavigatorMove {
+					payload = map[string]interface{}{"moves": []interface{}{}}
+				}
+				if act.Type == model.ActionPirateChooseDestination {
+					payload["destination"] = "port"
+				}
+				return model.Action{PlayerID: playerID, Type: act.Type, Payload: payload}, nil
+			}
+		}
+	}
+	act := acts[0]
+	return model.Action{PlayerID: playerID, Type: act.Type, Payload: copyPayload(act.Payload)}, nil
+}
+
+func overviewPreferredPlacement(g *model.Game, playerID int) string {
+	preferences := map[int]map[int]string{
+		1: {1: "ship", 2: "port", 3: "dock", 4: "insurance"},
+		2: {1: "ship", 2: "pirate", 3: "ship", 4: "port"},
+		3: {1: "ship", 2: "dock", 3: "port", 4: "navigatorSmall"},
+	}
+	if byPlayer, ok := preferences[g.Round.PlacementStep]; ok {
+		if position, ok := byPlayer[playerID]; ok {
+			return position
+		}
+	}
+	return "ship"
 }
 
 func setupPlayerPlacementRound(s *Service, g *model.Game, buyShare bool, starts map[string]int) error {

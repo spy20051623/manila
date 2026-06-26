@@ -347,7 +347,7 @@ async function createRoom() {
 }
 
 async function startTutorial() {
-  const chapterId = localStorage.getItem("manilaTutorialLastChapter") || "auction";
+  const chapterId = localStorage.getItem("manilaTutorialLastChapter") || "overview";
   const data = await api("/tutorials", { method: "POST", body: JSON.stringify({ chapterId }) });
   const tutorial = data.tutorial || {};
   if (tutorial.chapterId) localStorage.setItem("manilaTutorialLastChapter", tutorial.chapterId);

@@ -3776,6 +3776,7 @@ function renderTutorialPanel() {
   const complete = Boolean(tutorial.completed);
   const chapterIndex = Number(tutorial.chapterIndex || 0);
   const chapterCount = Number(tutorial.chapterCount || chapters.length || 1);
+  const lastChapterNumber = Math.max(0, chapterCount - 1);
   const nextChapter = chapterIndex + 1 < chapters.length ? chapters[chapterIndex + 1] : null;
   const finalChapterComplete = complete && chapterIndex + 1 >= chapterCount;
   const actionHTML = complete
@@ -3788,7 +3789,7 @@ function renderTutorialPanel() {
   panel.innerHTML = `
     <div class="tutorial-head">
       <div>
-        <p>教学关 ${chapterIndex + 1}/${chapterCount}</p>
+        <p>第 ${chapterIndex} 关 / ${lastChapterNumber}</p>
         <h2>${escapeHTML(tutorial.chapterTitle || "教学关")}</h2>
       </div>
     </div>
@@ -3865,7 +3866,7 @@ function renderTutorialChapterPanel() {
     const done = localStorage.getItem(`manilaTutorialCompleted:${chapter.id}`) === "1";
     const active = chapter.id === tutorial?.chapterId;
     const status = active ? "当前" : (done ? "已完成" : "");
-    const label = `${index + 1}. ${chapter.title || chapter.id}${status ? ` · ${status}` : ""}`;
+    const label = `${index}. ${chapter.title || chapter.id}${status ? ` · ${status}` : ""}`;
     return `<button class="tutorial-chapter-choice ${active ? "active" : ""} ${done ? "done" : ""}" type="button" data-tutorial-chapter="${escapeAttr(chapter.id)}">${escapeHTML(label)}</button>`;
   }).join("");
   list.querySelectorAll("[data-tutorial-chapter]").forEach((button) => {

@@ -15,13 +15,14 @@ import (
 func TestTutorialChaptersAreMergedAndOldIDsMap(t *testing.T) {
 	svc := NewService(store.NewMemoryStore(), rules.NewEngine())
 	chapters := svc.TutorialChapters()
-	if len(chapters) != 4 {
-		t.Fatalf("expected 4 tutorial chapters, got %+v", chapters)
+	if len(chapters) != 5 {
+		t.Fatalf("expected 5 tutorial chapters, got %+v", chapters)
 	}
-	if chapters[0].ID != "intro" || chapters[1].ID != "placement_main" || chapters[2].ID != "voyage" || chapters[3].ID != "settlement_money" {
+	if chapters[0].ID != "overview" || chapters[1].ID != "intro" || chapters[2].ID != "placement_main" || chapters[3].ID != "voyage" || chapters[4].ID != "settlement_money" {
 		t.Fatalf("unexpected merged chapters: %+v", chapters)
 	}
 	for oldID, want := range map[string]string{
+		"overview":      "overview",
 		"auction":       "intro",
 		"harbor":        "intro",
 		"placement":     "placement_main",
@@ -100,6 +101,7 @@ func TestTutorialStepsHaveClearGuideTargetsAndNoHighlightWording(t *testing.T) {
 		"机会变多",
 		"最后一轮",
 		"接近最高市值",
+		"代替你",
 	}
 	preResultSpoilers := map[string][]string{
 		"round4-place-pirate":   {"停在 13", "刚好", "升到 30", "结束"},
@@ -1421,6 +1423,61 @@ func TestSettlementTutorialMortgageAndBankruptStowaway(t *testing.T) {
 	}
 	if !tutorial.Completed {
 		t.Fatalf("expected settlement tutorial to complete after final game end, got %+v", tutorial)
+	}
+}
+
+func TestOverviewTutorialAutoplaysCompleteGame(t *testing.T) {
+	svc := NewService(store.NewMemoryStore(), rules.NewEngine())
+	g, tutorial, err := svc.CreateTutorial("overview")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tutorial.ChapterID != "overview" || tutorial.StepID != "overview-goal" {
+		t.Fatalf("expected overview tutorial opening, got %+v", tutorial)
+	}
+	if g.Status != model.StatusNotStarted {
+		t.Fatalf("overview should begin before the game starts, got %s", g.Status)
+	}
+	wantSteps := []string{
+		"overview-goal",
+		"overview-auction",
+		"overview-preparation",
+		"overview-placement",
+		"overview-first-sailing",
+		"overview-events",
+		"overview-settlement",
+		"overview-market",
+		"overview-midgame",
+		"overview-game-end",
+		"overview-final-score",
+	}
+	seen := map[string]bool{}
+	for !tutorial.Completed {
+		stepID := tutorial.StepID
+		seen[stepID] = true
+		assertOnlyTutorialContinue(t, svc, tutorial.SessionID)
+		beforeEventSeq := g.EventSeq
+		g, tutorial, err = svc.ApplyTutorialAction(tutorial.SessionID, model.Action{Type: model.ActionTutorialContinue})
+		if err != nil {
+			t.Fatalf("continue overview step %s: %v", stepID, err)
+		}
+		if g.EventSeq <= beforeEventSeq {
+			t.Fatalf("overview step %s did not advance event stream", stepID)
+		}
+	}
+	for _, stepID := range wantSteps {
+		if !seen[stepID] {
+			t.Fatalf("overview tutorial did not visit step %s; visited %+v", stepID, seen)
+		}
+	}
+	if g.Status != model.StatusEnded || g.Phase != model.PhaseGameEnd {
+		t.Fatalf("overview should finish after a complete game, status=%s phase=%s", g.Status, g.Phase)
+	}
+	if len(g.FinalScores) == 0 || g.FinalScores[0].PlayerID != tutorialPlayerID || g.FinalScores[0].Rank != 1 {
+		t.Fatalf("overview should end with P1 in first place, got %+v", g.FinalScores)
+	}
+	if tutorial.CompletionTitle != "完成概览" || tutorial.CompletionBody == "" || tutorial.StepID != "" {
+		t.Fatalf("expected overview completion panel, got %+v", tutorial)
 	}
 }
 

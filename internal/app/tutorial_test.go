@@ -44,6 +44,31 @@ func TestTutorialChaptersAreMergedAndOldIDsMap(t *testing.T) {
 	}
 }
 
+func TestTutorialGamesUseIndependentGameIDs(t *testing.T) {
+	st := store.NewMemoryStore()
+	svc := NewService(st, rules.NewEngine())
+
+	g1, tutorial1, err := svc.CreateTutorial("overview")
+	if err != nil {
+		t.Fatal(err)
+	}
+	g2, tutorial2, err := svc.CreateTutorial("intro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tutorial1.SessionID != "tutorial-1" || g1.ID != "tutorial-game-1" {
+		t.Fatalf("expected first tutorial/session ids, got session=%q game=%q", tutorial1.SessionID, g1.ID)
+	}
+	if tutorial2.SessionID != "tutorial-2" || g2.ID != "tutorial-game-2" {
+		t.Fatalf("expected second tutorial/session ids, got session=%q game=%q", tutorial2.SessionID, g2.ID)
+	}
+
+	regular := svc.CreateGame(nil)
+	if regular.ID != "game-1" {
+		t.Fatalf("tutorial games should not consume regular game ids, got %q", regular.ID)
+	}
+}
+
 func TestTutorialStepsHaveClearGuideTargetsAndNoHighlightWording(t *testing.T) {
 	svc := NewService(store.NewMemoryStore(), rules.NewEngine())
 	classroomPhrases := []string{"高亮", "本教学", "本步", "适合用来", "方便理解", "学习", "通常不会", "急着"}

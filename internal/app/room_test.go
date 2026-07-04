@@ -131,6 +131,41 @@ func TestRoomViewIncludesCompletedGamesNewestFirst(t *testing.T) {
 	}
 }
 
+func TestCompletedGamesExcludeTutorialGames(t *testing.T) {
+	st := store.NewMemoryStore()
+	svc := NewService(st, rules.NewEngine())
+	defaultRoomForTest(svc)
+
+	tutorialGame, _, err := svc.CreateTutorial("overview")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tutorialGame.Status = model.StatusEnded
+	tutorialGame.RoundNumber = 5
+	tutorialGame.FinalScores = []model.Score{{PlayerID: 1, Wealth: 155, Rank: 1}}
+
+	regularGame := svc.CreateGame(nil)
+	regularGame.Status = model.StatusEnded
+	regularGame.RoundNumber = 4
+	regularGame.FinalScores = []model.Score{{PlayerID: 2, Wealth: 130, Rank: 1}}
+
+	lobby, err := svc.LobbyView("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lobby.CompletedGames) != 1 || lobby.CompletedGames[0].GameID != regularGame.ID {
+		t.Fatalf("expected only regular completed game in lobby, got %+v", lobby.CompletedGames)
+	}
+
+	room, err := svc.RoomViewInRoom(defaultRoomID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(room.CompletedGames) != 1 || room.CompletedGames[0].GameID != regularGame.ID {
+		t.Fatalf("expected only regular completed game in room, got %+v", room.CompletedGames)
+	}
+}
+
 func TestDisconnectInLobbyUnreadiesAndReleasesSeat(t *testing.T) {
 	svc := NewService(store.NewMemoryStore(), rules.NewEngine())
 	room := defaultRoomForTest(svc)

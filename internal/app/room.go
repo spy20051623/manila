@@ -292,12 +292,13 @@ func (s *Service) RoomView(token string) (model.RoomView, error) {
 }
 
 func (s *Service) completedGameSummaries() []model.CompletedGameSummary {
+	tutorialGames := s.tutorialGameIDs()
 	refs := s.store.List()
 	summaries := make([]model.CompletedGameSummary, 0, len(refs))
 	for _, ref := range refs {
 		ref.Mu.Lock()
 		g := ref.Game
-		if g != nil && g.Status == model.StatusEnded {
+		if g != nil && g.Status == model.StatusEnded && !tutorialGames[g.ID] {
 			scores := append([]model.Score(nil), g.FinalScores...)
 			summaries = append(summaries, model.CompletedGameSummary{
 				GameID:      g.ID,

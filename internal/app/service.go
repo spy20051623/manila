@@ -20,21 +20,22 @@ const defaultTrainedGenomePath = "ai_weights_current/best_genome.json"
 const defaultTrainedPoolPath = "ai_weights_current/genome_pool.json"
 
 type Service struct {
-	store         *store.MemoryStore
-	engine        *rules.Engine
-	aiMu          sync.Mutex
-	aiAssignments map[string]map[int]ai.Genome
-	roomMu        sync.Mutex
-	participants  map[string]*roomParticipant
-	rooms         map[string]*roomState
-	tutorials     map[string]*tutorialSession
-	gameRooms     map[string]string
-	gameSnapshots map[string]gameRoomSnapshot
-	nextTutorial  int
-	nextRoom      int
-	adminToken    string
-	notify        func()
-	notifyGame    func(string)
+	store            *store.MemoryStore
+	engine           *rules.Engine
+	aiMu             sync.Mutex
+	aiAssignments    map[string]map[int]ai.Genome
+	roomMu           sync.Mutex
+	participants     map[string]*roomParticipant
+	rooms            map[string]*roomState
+	tutorials        map[string]*tutorialSession
+	gameRooms        map[string]string
+	gameSnapshots    map[string]gameRoomSnapshot
+	nextTutorial     int
+	nextTutorialGame int
+	nextRoom         int
+	adminToken       string
+	notify           func()
+	notifyGame       func(string)
 }
 
 func NewService(st *store.MemoryStore, eng *rules.Engine) *Service {
@@ -43,17 +44,18 @@ func NewService(st *store.MemoryStore, eng *rules.Engine) *Service {
 		adminToken = fmt.Sprintf("admin-%d", time.Now().UnixNano())
 	}
 	s := &Service{
-		store:         st,
-		engine:        eng,
-		aiAssignments: map[string]map[int]ai.Genome{},
-		participants:  map[string]*roomParticipant{},
-		rooms:         map[string]*roomState{},
-		tutorials:     map[string]*tutorialSession{},
-		gameRooms:     map[string]string{},
-		gameSnapshots: map[string]gameRoomSnapshot{},
-		nextTutorial:  1,
-		nextRoom:      1,
-		adminToken:    adminToken,
+		store:            st,
+		engine:           eng,
+		aiAssignments:    map[string]map[int]ai.Genome{},
+		participants:     map[string]*roomParticipant{},
+		rooms:            map[string]*roomState{},
+		tutorials:        map[string]*tutorialSession{},
+		gameRooms:        map[string]string{},
+		gameSnapshots:    map[string]gameRoomSnapshot{},
+		nextTutorial:     1,
+		nextTutorialGame: 1,
+		nextRoom:         1,
+		adminToken:       adminToken,
 	}
 	return s
 }

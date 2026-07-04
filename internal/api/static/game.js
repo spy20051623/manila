@@ -73,7 +73,6 @@ const GAME_IMAGE_ASSETS = [
 ];
 const LOADING_TOTAL_ITEMS = GAME_IMAGE_ASSETS.length + 2;
 const loadedGameImages = new Set();
-const skippedGameImages = new Set();
 let failedGameImages = [];
 let loadingDoneItems = 0;
 let loadingStateLoaded = false;
@@ -270,10 +269,8 @@ function actionSubmitPath() {
 
 function setupGameLoadingControls() {
   const retry = $("gameLoadingRetryBtn");
-  const continueButton = $("gameLoadingContinueBtn");
   const returnButton = $("gameLoadingReturnBtn");
-  if (retry) retry.onclick = () => resumeGameLoading(false).catch(showGameLoadingFailure);
-  if (continueButton) continueButton.onclick = () => resumeGameLoading(true).catch(showGameLoadingFailure);
+  if (retry) retry.onclick = () => resumeGameLoading().catch(showGameLoadingFailure);
   if (returnButton) returnButton.onclick = () => returnToLobby();
 }
 
@@ -282,7 +279,6 @@ function resetGameLoadingProgress() {
   loadingStateLoaded = false;
   failedGameImages = [];
   loadedGameImages.clear();
-  skippedGameImages.clear();
   document.body.classList.add("game-loading");
   setGameLoadingBusy(false);
   updateGameLoadingProgress("准备资源", "");
@@ -309,11 +305,8 @@ function updateGameLoadingProgress(label, detail = "") {
 
 function setGameLoadingBusy(busy) {
   const retry = $("gameLoadingRetryBtn");
-  const continueButton = $("gameLoadingContinueBtn");
   if (retry) retry.hidden = true;
-  if (continueButton) continueButton.hidden = true;
   if (retry) retry.disabled = busy;
-  if (continueButton) continueButton.disabled = busy;
 }
 
 async function bootGamePage() {
@@ -321,7 +314,7 @@ async function bootGamePage() {
   resetGameLoadingProgress();
   try {
     markGameLoadingItem("加载基础资源");
-    await resumeGameLoading(false);
+    await resumeGameLoading();
   } catch (err) {
     if (isMissingGameOrRoomError(err)) {
       returnToLobby({ keepRoom: false });
@@ -331,23 +324,18 @@ async function bootGamePage() {
   }
 }
 
-async function resumeGameLoading(allowMissingImages) {
+async function resumeGameLoading() {
   setGameLoadingBusy(true);
-  if (allowMissingImages) {
-    skipFailedGameImages();
-  }
-  if (!allowMissingImages) {
-    await preloadRemainingGameImages();
-  }
+  await preloadRemainingGameImages();
   await loadBootGameStateWithRetry();
   finishGameLoading();
 }
 
 async function preloadRemainingGameImages() {
-  const pending = GAME_IMAGE_ASSETS.filter((src) => !loadedGameImages.has(src) && !skippedGameImages.has(src));
+  const pending = GAME_IMAGE_ASSETS.filter((src) => !loadedGameImages.has(src));
   failedGameImages = [];
   if (!pending.length) return;
-  updateGameLoadingProgress("加载图片资源", `${loadedGameImages.size + skippedGameImages.size}/${GAME_IMAGE_ASSETS.length}`);
+  updateGameLoadingProgress("加载图片资源", `${loadedGameImages.size}/${GAME_IMAGE_ASSETS.length}`);
   const results = await Promise.allSettled(pending.map((src) => loadGameImageWithRetry(src)));
   failedGameImages = results
     .map((result, index) => (result.status === "rejected" ? pending[index] : ""))
@@ -362,10 +350,10 @@ async function preloadRemainingGameImages() {
 }
 
 async function loadGameImageWithRetry(src) {
-  if (loadedGameImages.has(src) || skippedGameImages.has(src)) return;
+  if (loadedGameImages.has(src)) return;
   await retryLoadingResource(() => loadGameImage(src), LOADING_MAX_ATTEMPTS);
   loadedGameImages.add(src);
-  markGameLoadingItem("加载图片资源", `${loadedGameImages.size + skippedGameImages.size}/${GAME_IMAGE_ASSETS.length}`);
+  markGameLoadingItem("加载图片资源", `${loadedGameImages.size}/${GAME_IMAGE_ASSETS.length}`);
 }
 
 function loadGameImage(src) {
@@ -378,15 +366,6 @@ function loadGameImage(src) {
       img.decode().then(resolve).catch(reject);
     }
   });
-}
-
-function skipFailedGameImages() {
-  for (const src of failedGameImages) {
-    if (loadedGameImages.has(src) || skippedGameImages.has(src)) continue;
-    skippedGameImages.add(src);
-    markGameLoadingItem("跳过缺失图片", `${loadedGameImages.size + skippedGameImages.size}/${GAME_IMAGE_ASSETS.length}`);
-  }
-  failedGameImages = [];
 }
 
 async function loadBootGameStateWithRetry() {
@@ -445,17 +424,11 @@ function showGameLoadingFailure(err) {
     returnToLobby({ keepRoom: false });
     return;
   }
-  const kind = err?.loadingKind || "state";
   const retry = $("gameLoadingRetryBtn");
-  const continueButton = $("gameLoadingContinueBtn");
   updateGameLoadingProgress(err?.message || "加载失败", err?.loadingDetail || "请重试加载。");
   if (retry) {
     retry.hidden = false;
     retry.disabled = false;
-  }
-  if (continueButton) {
-    continueButton.hidden = kind !== "image";
-    continueButton.disabled = false;
   }
 }
 

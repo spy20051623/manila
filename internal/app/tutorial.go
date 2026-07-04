@@ -211,8 +211,22 @@ func (s *Service) nextTutorialIDs() (string, string) {
 	s.roomMu.Lock()
 	defer s.roomMu.Unlock()
 	id := fmt.Sprintf("tutorial-%d", s.nextTutorial)
+	gameID := fmt.Sprintf("tutorial-game-%d", s.nextTutorialGame)
 	s.nextTutorial++
-	return id, s.store.NextID()
+	s.nextTutorialGame++
+	return id, gameID
+}
+
+func (s *Service) tutorialGameIDs() map[string]bool {
+	s.roomMu.Lock()
+	defer s.roomMu.Unlock()
+	ids := map[string]bool{}
+	for _, session := range s.tutorials {
+		if session != nil && session.GameID != "" {
+			ids[session.GameID] = true
+		}
+	}
+	return ids
 }
 
 func (s *Service) tutorialSession(sessionID string) (tutorialSession, error) {
